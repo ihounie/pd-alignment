@@ -29,6 +29,12 @@ from safe_rlhf.datasets.base import (
     TokenizedDataset,
     parse_dataset,
 )
+from safe_rlhf.datasets.pointwise_safe import (
+    PointwiseSafeBatch,
+    PointwiseSafeCollator,
+    PointwiseSafeDataset,
+    PointwiseSafeSample,
+)
 from safe_rlhf.datasets.preference import (
     PreferenceBatch,
     PreferenceCollator,
@@ -79,6 +85,10 @@ __all__ = [
     'SupervisedCollator',
     'SupervisedSample',
     'SupervisedBatch',
+    'PointwiseSafeDataset',
+    'PointwiseSafeCollator',
+    'PointwiseSafeSample',
+    'PointwiseSafeBatch',
     *raw.__all__,
 ]
 

@@ -107,19 +107,17 @@ class PointwiseSafeDataset(TokenizedDataset):
         worse_safe = float(raw_sample.get('is_other_safe', 0))
 
         # Tokenize each field
-        prompt_input_ids = self.tokenize(prompt_text + self.tokenizer.eos_token)
-        better_input_ids = self.tokenize(better_answer_text + self.tokenizer.eos_token)
-        worse_input_ids = self.tokenize(worse_answer_text + self.tokenizer.eos_token)
+        better_input_ids = self.tokenize(
+            prompt_text + better_answer_text + self.tokenizer.eos_token
+        )
+        worse_input_ids = self.tokenize(prompt_text + worse_answer_text + self.tokenizer.eos_token)
 
         # Return typed dict with everything we need
         return {
-            'prompt_input_ids': prompt_input_ids,
             'better_input_ids': better_input_ids,
             'worse_input_ids': worse_input_ids,
             'better_safe': better_safe,
             'worse_safe': worse_safe,
-            'better_lambda': 0.0,
-            'worse_lambda': 0.0,
         }
 
     def get_collator(self) -> Callable[[list[PointwiseSafeSample]], PointwiseSafeBatch]:
@@ -147,37 +145,28 @@ class PointwiseSafeCollator(CollatorBase):
         5. Return a dictionary conforming to PointwiseSafeBatch
         """
         # 1) Gather IDs for all samples, then pad them in one shot
-        prompt_ids_list = [s['prompt_input_ids'] for s in samples]
         better_ids_list = [s['better_input_ids'] for s in samples]
         worse_ids_list = [s['worse_input_ids'] for s in samples]
 
         # Build separate lists of input_ids for padding
         # or you can combine them, pad, then chunk:
-        prompt_input_ids = right_padding(prompt_ids_list, padding_value=self.pad_token_id)
         better_input_ids = right_padding(better_ids_list, padding_value=self.pad_token_id)
         worse_input_ids = right_padding(worse_ids_list, padding_value=self.pad_token_id)
 
         # 2) Create attention masks (1 where tokens are present, 0 where padded)
-        prompt_attention_mask = prompt_input_ids != self.pad_token_id
         better_attention_mask = better_input_ids != self.pad_token_id
         worse_attention_mask = worse_input_ids != self.pad_token_id
 
         # 3) Convert the float fields to float tensors
         better_safe = torch.tensor([s['better_safe'] for s in samples], dtype=torch.float)
         worse_safe = torch.tensor([s['worse_safe'] for s in samples], dtype=torch.float)
-        better_lambda = torch.tensor([s['better_lambda'] for s in samples], dtype=torch.float)
-        worse_lambda = torch.tensor([s['worse_lambda'] for s in samples], dtype=torch.float)
 
         # 4) Return everything as a single batch dictionary
         return {
-            'prompt_input_ids': prompt_input_ids,
-            'prompt_attention_mask': prompt_attention_mask,
             'better_input_ids': better_input_ids,
             'better_attention_mask': better_attention_mask,
             'worse_input_ids': worse_input_ids,
             'worse_attention_mask': worse_attention_mask,
             'better_safe': better_safe,
             'worse_safe': worse_safe,
-            'better_lambda': better_lambda,
-            'worse_lambda': worse_lambda,
         }
