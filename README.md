@@ -5,6 +5,13 @@
   <img src="images/PKU-Beaver-logo-wide.svg" width="80%"/>
 </div>
 
+<h1 align="center">Pre-commit Hooks</h1>
+- This project uses **black**, **isort**, and **flake8** for enforcing code style. See `requirements.txt` for version numbers.
+- We use **pre-commit** hooks to ensure that all code committed respects the code style.
+- After (1) cloning the repo, (2) creating your environment and (3) installing the required
+packages, you are strongly encouraged to run `pre-commit install` to set-up pre-commit hooks.
+- Run it with `pre-commit run --all-files` to check your code before committing.
+
 <h1 align="center">Constrained Value-Aligned LLM via Safe RLHF</h1>
 
 Beaver is a highly modular open-source RLHF framework developed by the PKU-Alignment team at Peking University.
