@@ -127,12 +127,23 @@ class PointwiseSafeDataset(TokenizedDataset):
         """
         return PointwiseSafeCollator(self.tokenizer.pad_token_id)
 
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        """Get a tokenized data sample by index."""
+        data = self.data[index]
+        if data is self._SENTINEL:
+            raw_sample = self.rawdata[index]
+            data = self.preprocess(raw_sample)
+            self.data[index] = data
+        # Add the index to the data dictionary
+        data['index'] = index
+        return data
+
 
 class PointwiseSafeCollator(CollatorBase):
     """
     Collator that:
       - pads the prompt_input_ids, better_input_ids, and worse_input_ids
-      - splits them back into separate batch tensors
+      - splits them back into separate batch tendata['index'] = torch.tensor(index)sors
       - converts the safe/dual/lambda floats to tensors
     """
 
@@ -147,6 +158,7 @@ class PointwiseSafeCollator(CollatorBase):
         # 1) Gather IDs for all samples, then pad them in one shot
         better_ids_list = [s['better_input_ids'] for s in samples]
         worse_ids_list = [s['worse_input_ids'] for s in samples]
+        index_list = [s['index'] for s in samples]
 
         # Build separate lists of input_ids for padding
         # or you can combine them, pad, then chunk:
@@ -160,6 +172,7 @@ class PointwiseSafeCollator(CollatorBase):
         # 3) Convert the float fields to float tensors
         better_safe = torch.tensor([s['better_safe'] for s in samples], dtype=torch.float)
         worse_safe = torch.tensor([s['worse_safe'] for s in samples], dtype=torch.float)
+        indexes = torch.tensor(index_list, dtype=torch.long)
 
         # 4) Return everything as a single batch dictionary
         return {
@@ -169,4 +182,5 @@ class PointwiseSafeCollator(CollatorBase):
             'worse_attention_mask': worse_attention_mask,
             'better_safe': better_safe,
             'worse_safe': worse_safe,
+            'index': indexes,
         }

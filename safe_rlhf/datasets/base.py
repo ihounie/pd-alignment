@@ -229,6 +229,7 @@ class TokenizedDataset(Dataset[Dict[str, torch.Tensor]]):
                 )
 
         super().__init__()
+        self.num_respones = 2
         self.dataset_names_and_proportion: dict[str, float | Fraction] = {}
         self.raw_datasets = []
         for name, attributes in dict(dataset_names_and_attributes).items():

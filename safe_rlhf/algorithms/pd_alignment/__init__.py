@@ -12,12 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Trainer base classes."""
+"""The Pointwise Dual Alignement Trainer algorithm."""
 
-from safe_rlhf.trainers.base import TrainerBase
-from safe_rlhf.trainers.dual_trainer import DualTrainer
-from safe_rlhf.trainers.rl_trainer import RLTrainer
-from safe_rlhf.trainers.supervised_trainer import SupervisedTrainer
+from safe_rlhf.algorithms.pd_alignment.trainer import PdAlignementTrainer
 
 
-__all__ = ['TrainerBase', 'RLTrainer', 'SupervisedTrainer', 'DualTrainer']
+__all__ = ['PdAlignementTrainer']

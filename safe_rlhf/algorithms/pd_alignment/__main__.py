@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Trainer base classes."""
+"""The main training script to run the DPO algorithm."""
 
-from safe_rlhf.trainers.base import TrainerBase
-from safe_rlhf.trainers.dual_trainer import DualTrainer
-from safe_rlhf.trainers.rl_trainer import RLTrainer
-from safe_rlhf.trainers.supervised_trainer import SupervisedTrainer
+import sys
+
+from safe_rlhf.algorithms.pd_alignment.main import main
 
 
-__all__ = ['TrainerBase', 'RLTrainer', 'SupervisedTrainer', 'DualTrainer']
+if __name__ == '__main__':
+    sys.exit(main())
