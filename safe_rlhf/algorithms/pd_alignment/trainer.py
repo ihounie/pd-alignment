@@ -21,6 +21,7 @@ from typing import Any
 import deepspeed
 import torch
 import torch.nn.functional as F
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
@@ -74,20 +75,33 @@ class PdAlignementTrainer(DualTrainer):
             auto_model_type=AutoModelForCausalLM,
             trust_remote_code=self.args.trust_remote_code,
         )
-        self.reference_model, _ = load_pretrained_models(
-            self.args.model_name_or_path,
-            model_max_length=self.args.max_length,
-            padding_side='left',
-            auto_model_type=AutoModelForCausalLM,
-            trust_remote_code=self.args.trust_remote_code,
+        self.model = get_peft_model(
+            self.model,
+            LoraConfig(
+                r=8,
+                lora_alpha=16,
+                lora_dropout=0.1,
+                target_modules=[
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "down_proj",
+                    "up_proj",
+                    "lm_head",
+                ],
+            ),
         )
 
     def init_engines(self) -> None:
         super().init_engines()
-        self.reference_model, *_ = deepspeed.initialize(
-            model=self.reference_model,
+        '''
+        self.model, *_ = deepspeed.initialize(
+            model=self.model,
             config=self.ds_eval_config,
         )
+        '''
 
     @staticmethod
     def compute_log_probs(
@@ -97,6 +111,7 @@ class PdAlignementTrainer(DualTrainer):
     ) -> torch.Tensor:
         """Compute log probabilities of given sequences."""
         logits = model(input_ids, attention_mask=attention_mask).logits
+        # breakpoint()
         return gather_log_probabilities(logits[:, :-1], input_ids[:, 1:])
 
     def loss(  # pylint: disable=too-many-locals
@@ -108,6 +123,10 @@ class PdAlignementTrainer(DualTrainer):
         better_safe=torch.BoolTensor,
         worse_safe=torch.BoolTensor,
         multipliers=torch.FloatTensor,
+        costs=torch.FloatTensor,
+        rewards=torch.FloatTensor,
+        ref_sequence_log_probs=torch.FloatTensor,
+        response_masks=torch.BoolTensor,  # size = (B, L)
     ) -> dict[str, torch.Tensor]:
         """Loss function for the pdalignment algorithm.
 
@@ -122,7 +141,6 @@ class PdAlignementTrainer(DualTrainer):
         """
         assert better_input_ids.size(0) == worse_input_ids.size(0), 'batch size mismatch!'
         batch_size = better_input_ids.size(0)
-
         sequence_log_probs = self.compute_log_probs(  # size = (2 * B, L - 1)
             self.model.module,
             input_ids=torch.cat([better_input_ids, worse_input_ids], dim=0),
@@ -133,54 +151,34 @@ class PdAlignementTrainer(DualTrainer):
             worse_sequence_log_probs,  # size = (B, L - 1)
         ) = sequence_log_probs.chunk(chunks=2, dim=0)
 
-        with torch.no_grad():
-            ref_sequence_log_probs = self.compute_log_probs(  # size = (2 * B, L - 1)
-                self.reference_model.module,
-                input_ids=torch.cat([better_input_ids, worse_input_ids], dim=0),
-                attention_mask=torch.cat([better_attention_mask, worse_attention_mask], dim=0),
-            )
-            (
-                ref_better_sequence_log_probs,  # size = (B, L - 1)
-                ref_worse_sequence_log_probs,  # size = (B, L - 1)
-            ) = ref_sequence_log_probs.chunk(chunks=2, dim=0)
+        better_log_prob = (
+            better_sequence_log_probs * better_attention_mask[:, 1:] * response_masks[:, 1:]
+        ).sum(dim=1)
+        worse_log_prob = (
+            worse_sequence_log_probs * worse_attention_mask[:, 1:] * response_masks[:, 1:]
+        ).sum(dim=1)
+        ref_better_log_prob = ref_sequence_log_probs[:, 0]
+        ref_worse_log_prob = ref_sequence_log_probs[:, 1]
+        better_log_ratio = better_log_prob - ref_better_log_prob
+        worse_log_ratio = worse_log_prob - ref_worse_log_prob
 
-        losses = []
-        better_sample_rewards = []
-        worse_sample_rewards = []
-        for i in range(batch_size):
-            assert not torch.all(
-                torch.eq(better_input_ids[i], worse_input_ids[i]),
-            ).item(), 'The better and worse answers are the same!'
-            better_end_index = better_attention_mask[i].nonzero()[-1].squeeze().item()
-            worse_end_index = worse_attention_mask[i].nonzero()[-1].squeeze().item()
-            diverge_index = (
-                (better_input_ids[i] != worse_input_ids[i]).nonzero()[0].squeeze().item()
-            )
-            assert 0 <= diverge_index <= better_end_index, 'diverge index is out of range!'
-            assert 0 <= diverge_index <= worse_end_index, 'diverge index is out of range!'
-
-            better_seq_slice = slice(diverge_index, better_end_index + 1)
-            worse_seq_slice = slice(diverge_index, worse_end_index + 1)
-
-            # size = ()
-            better_log_prob = better_sequence_log_probs[i, better_seq_slice].sum(dim=-1)
-            worse_log_prob = worse_sequence_log_probs[i, worse_seq_slice].sum(dim=-1)
-            ref_better_log_prob = ref_better_sequence_log_probs[i, better_seq_slice].sum(dim=-1)
-            ref_worse_log_prob = ref_worse_sequence_log_probs[i, worse_seq_slice].sum(dim=-1)
-            better_log_ratio = better_log_prob - ref_better_log_prob
-            worse_log_ratio = worse_log_prob - ref_worse_log_prob
-
-            losses.append(-F.logsigmoid(self.scale_coeff * (better_log_ratio - worse_log_ratio)))
-            better_sample_rewards.append(self.scale_coeff * better_log_ratio.detach())
-            worse_sample_rewards.append(self.scale_coeff * worse_log_ratio.detach())
-
-        loss = torch.stack(losses).mean()  # size = ()
-        better_sample_reward = torch.stack(better_sample_rewards)  # size = (B,)
-        worse_sample_reward = torch.stack(worse_sample_rewards)  # size = (B,)
+        # lagrangian loss
+        lagrangian_loss = torch.exp(better_log_ratio) * (
+            rewards[:, 0] - self.scale_coeff * better_log_ratio - multipliers[:, 0] * costs[:, 0]
+        )
+        lagrangian_loss += torch.exp(worse_log_ratio) * (
+            rewards[:, 1] - self.scale_coeff * worse_log_ratio - multipliers[:, 1] * costs[:, 1]
+        )
+        lagrangian_loss += (multipliers**2).sum() / (2 * self.args.resilient_coeff)
+        losses = lagrangian_loss
+        better_sample_reward = self.scale_coeff * better_log_ratio.detach()
+        worse_sample_reward = self.scale_coeff * worse_log_ratio.detach()
+        slacks = torch.stack([torch.exp(better_log_ratio), torch.exp(worse_log_ratio)], dim=1)
+        loss = losses.mean()
         reward = better_sample_reward + worse_sample_reward  # size = (B,)
         reward_accuracy = (better_sample_reward > worse_sample_reward).float().mean()  # size = ()
         reward_margin = better_sample_reward - worse_sample_reward  # size = (B,)
-
+        slacks = slacks.to(multipliers.device).detach()  # size = (B,2)
         return {
             'loss': loss,
             'reward': reward,
@@ -188,10 +186,20 @@ class PdAlignementTrainer(DualTrainer):
             'worse_sample_reward': worse_sample_reward,
             'reward_accuracy': reward_accuracy,
             'reward_margin': reward_margin,
+            'slacks': slacks,
         }
 
-    def dual_step():
-        pass
+    def dual_step(
+        self,
+        slacks: torch.Tensor,
+        multipliers: torch.Tensor,
+    ):
+        # breakpoint()
+        multipliers = multipliers + self.args.dual_step_size * (
+            slacks - 1 / (2 * self.args.resilient_coeff) * multipliers
+        )
+        multipliers = torch.clamp(multipliers, min=0)
+        return multipliers
 
     def train_step(
         self,
@@ -202,6 +210,7 @@ class PdAlignementTrainer(DualTrainer):
         better_safe: torch.BoolTensor,
         worse_safe: torch.BoolTensor,
         index: torch.LongTensor,
+        response_masks: torch.BoolTensor,
     ) -> dict[str, Any]:
         """Perform a single training step.
 
@@ -210,26 +219,38 @@ class PdAlignementTrainer(DualTrainer):
             better_attention_mask (torch.BoolTensor): The attention mask of the better answer.
             worse_input_ids (torch.LongTensor): The input ids of the worse answer.
             worse_attention_mask (torch.BoolTensor): The attention mask of the worse answer.
-
+            better_safe (torch.BoolTensor): The safety of the better answer.
+            worse_safe (torch.BoolTensor): The safety of the worse answer.
+            index (torch.LongTensor): The index of the batch.
         Returns:
             dict[str, Any]: training loss, reward, learning rate
         """
         batch_multipliers = self.multipliers[index]
+        batch_costs = self.costs[index]
+        batch_rewards = self.rewards[index]
+        batch_ref_sequence_log_probs = self.baseline_logprobs[index]
 
         loss_dict = self.loss(
             better_input_ids=better_input_ids,
             better_attention_mask=better_attention_mask,
             worse_input_ids=worse_input_ids,
             worse_attention_mask=worse_attention_mask,
+            response_masks=response_masks,
             better_safe=better_safe,
             worse_safe=worse_safe,
             multipliers=batch_multipliers,
+            costs=batch_costs,
+            rewards=batch_rewards,
+            ref_sequence_log_probs=batch_ref_sequence_log_probs,
         )
         loss = loss_dict['loss']
         self.model.backward(loss)
         self.model.step()
 
         with torch.no_grad():
+            self.multipliers[index] = self.dual_step(
+                slacks=loss_dict['slacks'], multipliers=batch_multipliers
+            )
             reward = loss_dict['reward'].mean()
             better_sample_reward = loss_dict['better_sample_reward'].mean()
             worse_sample_reward = loss_dict['worse_sample_reward'].mean()

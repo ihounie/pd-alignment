@@ -46,6 +46,54 @@ def parse_arguments() -> argparse.Namespace:
         required=True,
     )
     model_parser.add_argument(
+        '--cost_model_name_or_path',
+        type=str,
+        help='Path to the model checkpoint or its name.',
+        required=True,
+    )
+    model_parser.add_argument(
+        '--reward_model_name_or_path',
+        type=str,
+        help='Path to the model checkpoint or its name.',
+        required=True,
+    )
+    model_parser.add_argument(
+        '--normalize_cost',
+        type=str2bool,
+        default=True,
+        help='Whether to normalize the cost.',
+    )
+    model_parser.add_argument(
+        '--normalize_reward',
+        type=str2bool,
+        default=True,
+        help='Whether to normalize the reward.',
+    )
+
+    model_parser.add_argument(
+        "--recompute_costs",
+        action="store_true",
+        help="Force recomputation of costs even if cache exists",
+    )
+    model_parser.add_argument(
+        "--recompute_rewards",
+        action="store_true",
+        help="Force recomputation of rewards even if cache exists",
+    )
+    model_parser.add_argument(
+        "--recompute_baseline",
+        action="store_true",
+        help="Force recomputation of baseline even if cache exists",
+    )
+
+    model_parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default="cache",
+        help="Directory to store cached computations",
+    )
+
+    model_parser.add_argument(
         '--max_length',
         type=int,
         default=512,
@@ -84,6 +132,20 @@ def parse_arguments() -> argparse.Namespace:
         default=0.02,
         help='The coefficient for the KL divergence between the reference and actor policy.',
     )
+    # Dual args
+    training_parser.add_argument(
+        '--resilient_coeff',
+        type=float,
+        default=1.0,
+        help='The coefficient for the resilient term.',
+    )
+    training_parser.add_argument(
+        '--dual_step_size',
+        type=float,
+        default=0.01,
+        help='The step size for the dual step.',
+    )
+
     training_parser.add_argument(
         '--epochs',
         type=int,
