@@ -28,6 +28,7 @@ class PointwiseSafeSample(TypedDict, total=True):
     prompt_input_ids: torch.LongTensor  # size = (L_prompt,)
     better_input_ids: torch.LongTensor  # size = (L_better,)
     worse_input_ids: torch.LongTensor  # size = (L_worse,)
+    response_index: int  # New field to store the precomputed response index
 
     # Additional scalar fields (floats):
     better_safe: float
@@ -112,12 +113,20 @@ class PointwiseSafeDataset(TokenizedDataset):
         )
         worse_input_ids = self.tokenize(prompt_text + worse_answer_text + self.tokenizer.eos_token)
 
+        # Compute response index by finding first difference
+        min_len = min(len(better_input_ids), len(worse_input_ids))
+        differences = [i for i in range(min_len) if better_input_ids[i] != worse_input_ids[i]]
+        if not differences:
+            raise ValueError("Found identical sequences in better and worse inputs")
+        response_index = differences[0]
+
         # Return typed dict with everything we need
         return {
             'better_input_ids': better_input_ids,
             'worse_input_ids': worse_input_ids,
             'better_safe': better_safe,
             'worse_safe': worse_safe,
+            'response_index': response_index,
         }
 
     def get_collator(self) -> Callable[[list[PointwiseSafeSample]], PointwiseSafeBatch]:
@@ -159,6 +168,7 @@ class PointwiseSafeCollator(CollatorBase):
         better_ids_list = [s['better_input_ids'] for s in samples]
         worse_ids_list = [s['worse_input_ids'] for s in samples]
         index_list = [s['index'] for s in samples]
+        response_index = torch.tensor([s['response_index'] for s in samples], dtype=torch.long)
 
         input_ids = better_ids_list + worse_ids_list  # size = (2 * B, L)
         attention_mask = [
@@ -177,23 +187,8 @@ class PointwiseSafeCollator(CollatorBase):
             worse_attention_mask,  # size = (B, L)
         ) = attention_mask.chunk(chunks=2, dim=0)
 
-        # Create mask of differences
-        differences = better_input_ids != worse_input_ids
-        # Check if any row has no differences
-        no_diff_rows = ~differences.any(dim=1)
-        if no_diff_rows.any():
-            # Get indices of rows with no differences for better error message
-            problem_indices = no_diff_rows.nonzero().squeeze(1)
-            raise ValueError(
-                f"Found identical sequences in better and worse inputs at batch indices: {problem_indices.tolist()}"
-            )
-
-        # If we get here, all rows have at least one difference
-        # argmax is not implemented for bool tensors (at least on CPU), so we need to convert to float
-        response_index = differences.float().argmax(dim=1)
-
         # Create response masks
-        batch_size, seq_length = better_input_ids.shape
+        _, seq_length = better_input_ids.shape
         response_masks = (
             torch.arange(seq_length, device=better_input_ids.device)[None, :]
             >= response_index[:, None]

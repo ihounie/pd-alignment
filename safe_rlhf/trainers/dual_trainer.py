@@ -29,11 +29,11 @@ from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler
+from transformers import AutoModelForCausalLM, get_scheduler
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
 from safe_rlhf.configs import ADAM_BETAS
-from safe_rlhf.datasets import PointwiseSafeDataset, TokenizedDataset
+from safe_rlhf.datasets import TokenizedDataset
 from safe_rlhf.models import AutoModelForScore, load_pretrained_models
 from safe_rlhf.trainers.base import TrainerBase
 from safe_rlhf.utils import get_optimizer_grouped_parameters, is_main_process, to_device
@@ -67,8 +67,6 @@ class DualTrainer(TrainerBase):
         print("initializing models ...")
         self.init_models()
         dist.barrier()
-        model_name_or_path = "PKU-Alignment/alpaca-7b-reproduced"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
         print("initializing datasets ...")
         self.init_datasets()
         dist.barrier()
