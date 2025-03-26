@@ -27,12 +27,14 @@ ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export LOGLEVEL="${LOGLEVEL:-WARNING}"
 
+export WANDB_ENTITY="alelab"
+
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
 COST_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v3.0-cost"
 REWARD_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v3.0-reward"
 OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment"
 unset HOSTFILE
-ZERO_STAGE=1
+ZERO_STAGE=0
 OFFLOAD="none"
 while [[ "$#" -gt 0 ]]; do
 	arg="$1"
@@ -88,10 +90,6 @@ fi
 
 cp -f "$0" "${OUTPUT_DIR}/script.sh"
 
-if [[ -z "${WANDB_API_KEY}" ]]; then
-	export WANDB_MODE="offline"
-fi
-
 MASTER_PORT_START=10000
 MASTER_PORT_END=65535
 MASTER_PORT="$(
@@ -109,17 +107,17 @@ DEEPSPEED_ARGS+=("--master_port" "${MASTER_PORT}")
 
 exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log" >&2)
 
-CUDA_VISIBLE_DEVICES=0 deepspeed "${DEEPSPEED_ARGS[@]}" \
+deepspeed "${DEEPSPEED_ARGS[@]}" \
 	--module safe_rlhf.algorithms.pd_alignment \
 	--train_datasets PKU-SafeRLHF/train \
 	--eval_datasets PKU-SafeRLHF/test \
 	--model_name_or_path "${MODEL_NAME_OR_PATH}" \
 	--max_length 512 \
 	--trust_remote_code True \
-	--epochs 2 \
-	--per_device_train_batch_size 4 \
+	--epochs 1 \
+	--per_device_train_batch_size 1 \
 	--per_device_eval_batch_size 1 \
-	--gradient_accumulation_steps 2 \
+	--gradient_accumulation_steps 16 \
 	--gradient_checkpointing \
 	--learning_rate 1e-6 \
 	--lr_scheduler_type cosine \

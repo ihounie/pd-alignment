@@ -170,7 +170,7 @@ class PdAlignementTrainer(DualTrainer):
             rewards[:, 1] - self.scale_coeff * worse_log_ratio - multipliers[:, 1] * costs[:, 1]
         )
         lagrangian_loss += (multipliers**2).sum() / (2 * self.args.resilient_coeff)
-        losses = lagrangian_loss
+        losses = -lagrangian_loss
         better_sample_reward = self.scale_coeff * better_log_ratio.detach()
         worse_sample_reward = self.scale_coeff * worse_log_ratio.detach()
         slacks = torch.stack([torch.exp(better_log_ratio), torch.exp(worse_log_ratio)], dim=1)

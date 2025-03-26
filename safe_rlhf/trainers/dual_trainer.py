@@ -105,10 +105,9 @@ class DualTrainer(TrainerBase):
         )
 
     def init_multipliers(self) -> None:
-        self.multipliers = torch.zeros(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones)
-        )
-        self.multipliers = to_device(self.multipliers, self.args.device)
+        self.multipliers = self.args.dual_step_size * self.costs.clone()
+        # clamp to 0
+        self.multipliers = torch.clamp(self.multipliers, min=0)
         return
 
     def init_baseline(self) -> None:
@@ -306,7 +305,6 @@ class DualTrainer(TrainerBase):
 
     def init_datasets(self) -> None:
         """Initialize training and evaluation datasets."""
-        print(self.DATASET_TYPE)
         train_dataset = self.DATASET_TYPE(
             self.args.train_datasets,
             tokenizer=self.tokenizer,
