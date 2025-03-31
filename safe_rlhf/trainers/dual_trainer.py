@@ -64,20 +64,26 @@ class DualTrainer(TrainerBase):
         self.ds_config = ds_config
         self.global_step = 0
 
-        print("initializing models ...")
+        print("initializing tokenizer ...")
         self.init_models()
         dist.barrier()
+
         print("initializing datasets ...")
         self.init_datasets()
         dist.barrier()
-        print("calculating baseline ...")
-        self.init_baseline()
-        dist.barrier()
+
         print("calculating rewards ...")
         self.init_rewards()
         dist.barrier()
         print("calculating costs ...")
         self.init_costs()
+        dist.barrier()
+
+        print("initializing models ...")
+        self.init_models()
+        dist.barrier()
+        print("calculating baseline ...")
+        self.init_baseline()
         dist.barrier()
         print("initializing engines ...")
         self.init_engines()
@@ -88,6 +94,21 @@ class DualTrainer(TrainerBase):
         print("initializing multipliers ...")
         self.init_multipliers()
         print("initialization done")
+
+    def init_tokenizer(self) -> None:
+        """Initialize model and tokenizer."""
+        if self.ds_config is not None and self.ds_config['zero_optimization']['stage'] == 3:
+            self.dstchf = HfDeepSpeedConfig(self.ds_config)
+
+        _, self.tokenizer = load_pretrained_models(
+            self.args.model_name_or_path,
+            model_max_length=self.args.max_length,
+            padding_side='right',
+            auto_model_type=self.MODEL_TYPE,
+            trust_remote_code=self.args.trust_remote_code,
+            auto_model_kwargs=self.extra_model_kwargs,
+            auto_tokenizer_kwargs=self.extra_tokenizer_kwargs,
+        )
 
     def init_models(self) -> None:
         """Initialize model and tokenizer."""

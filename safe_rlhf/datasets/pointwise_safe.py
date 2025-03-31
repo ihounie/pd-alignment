@@ -31,14 +31,8 @@ class PointwiseSafeSample(TypedDict, total=True):
     response_index: int  # New field to store the precomputed response index
 
     # Additional scalar fields (floats):
-    better_safe: float
-    worse_safe: float
-    better_dual: float
-    worse_dual: float
-
-    # Lambdas (initialized to zero here, can be learned later if needed):
-    better_lambda: float
-    worse_lambda: float
+    better_safe: torch.BoolType
+    worse_safe: torch.BoolType
 
 
 class PointwiseSafeBatch(TypedDict, total=True):
@@ -57,12 +51,11 @@ class PointwiseSafeBatch(TypedDict, total=True):
     worse_input_ids: torch.LongTensor  # size = (B, L_worse)
     worse_attention_mask: torch.BoolTensor  # size = (B, L_worse)
 
-    better_safe: torch.FloatTensor  # size = (B,)
-    worse_safe: torch.FloatTensor  # size = (B,)
-    better_dual: torch.FloatTensor  # size = (B,)
-    worse_dual: torch.FloatTensor  # size = (B,)
-    better_lambda: torch.FloatTensor  # size = (B,)
-    worse_lambda: torch.FloatTensor  # size = (B,)
+    better_safe: torch.BoolTensor  # size = (B,)
+    worse_safe: torch.BoolTensor  # size = (B,)
+
+    index: torch.LongTensor  # size = (B,)
+    response_masks: torch.BoolTensor  # size = (B, L_better)
 
 
 class PointwiseSafeDataset(TokenizedDataset):
@@ -103,9 +96,9 @@ class PointwiseSafeDataset(TokenizedDataset):
         better_answer_text = raw_sample.get('answer', "")
         worse_answer_text = raw_sample.get('other_answer', "")
 
-        # Convert these to floats (0.0 or 1.0) or your chosen logic
-        better_safe = float(raw_sample.get('is_safe', 0))
-        worse_safe = float(raw_sample.get('is_other_safe', 0))
+        # Boolean
+        better_safe = bool(raw_sample.get('is_safe', False))
+        worse_safe = bool(raw_sample.get('is_other_safe', False))
 
         # Tokenize each field
         better_input_ids = self.tokenize(
@@ -195,8 +188,8 @@ class PointwiseSafeCollator(CollatorBase):
         )
 
         # 3) Convert the other fields to tensors
-        better_safe = torch.tensor([s['better_safe'] for s in samples], dtype=torch.float)
-        worse_safe = torch.tensor([s['worse_safe'] for s in samples], dtype=torch.float)
+        better_safe = torch.tensor([s['better_safe'] for s in samples], dtype=torch.bool)
+        worse_safe = torch.tensor([s['worse_safe'] for s in samples], dtype=torch.bool)
         indexes = torch.tensor(index_list, dtype=torch.long)
         # 4) Return everything as a single batch dictionary
         return {
