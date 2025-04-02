@@ -171,7 +171,7 @@ class PdAlignementTrainer(DualTrainer):
         )
 
         # Safety loss
-        safety_loss += (
+        safety_loss = (
             -self.args.resilient_coeff
             / 2
             * (

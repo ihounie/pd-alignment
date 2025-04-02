@@ -30,12 +30,16 @@ export LOGLEVEL="${LOGLEVEL:-WARNING}"
 export WANDB_ENTITY="alelab"
 
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
-COST_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v3.0-cost"
-REWARD_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v3.0-reward"
-OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment"
+COST_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v1.0-cost"
+REWARD_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v1.0-reward"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment-${timestamp}"
 unset HOSTFILE
 ZERO_STAGE=0
 OFFLOAD="none"
+SAFETY_RATIO_TOL=0.1
+RESILIENT_COEFF=1.0
+SCALE_COEFF=0.1
 while [[ "$#" -gt 0 ]]; do
 	arg="$1"
 	shift
@@ -75,6 +79,27 @@ while [[ "$#" -gt 0 ]]; do
 		--offload=*)
 			OFFLOAD="${arg#*=}"
 			;;
+		--safety_ratio_tol)
+			SAFETY_RATIO_TOL="$1"
+			shift
+			;;
+		--safety_ratio_tol=*)
+			SAFETY_RATIO_TOL="${arg#*=}"
+			;;
+		--resilient_coeff)
+			RESILIENT_COEFF="$1"
+			shift
+			;;
+		--resilient_coeff=*)
+			RESILIENT_COEFF="${arg#*=}"
+			;;
+		--scale_coeff)
+			SCALE_COEFF="$1"
+			shift
+			;;
+		--scale_coeff=*)
+			SCALE_COEFF="${arg#*=}"
+			;;
 		*)
 			echo "Unknown parameter passed: '${arg}'" >&2
 			exit 1
@@ -107,7 +132,8 @@ DEEPSPEED_ARGS+=("--master_port" "${MASTER_PORT}")
 
 exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log" >&2)
 
-deepspeed "${DEEPSPEED_ARGS[@]}" \
+
+CUDA_VISIBLE_DEVICES=0,1 deepspeed "${DEEPSPEED_ARGS[@]}" \
 	--module safe_rlhf.algorithms.pd_alignment \
 	--train_datasets PKU-SafeRLHF/train \
 	--eval_datasets PKU-SafeRLHF/test \
@@ -126,15 +152,16 @@ deepspeed "${DEEPSPEED_ARGS[@]}" \
 	--seed 42 \
 	--need_eval \
 	--eval_strategy epoch \
-	--resilient_coeff 1.0 \
+	--resilient_coeff "${RESILIENT_COEFF}" \
 	--dual_step_size 0.01 \
-	--scale_coeff 0.1 \
+	--scale_coeff "${SCALE_COEFF}" \
+	--safety_ratio_tol "${SAFETY_RATIO_TOL}" \
 	--output_dir "${OUTPUT_DIR}" \
 	--log_type wandb \
 	--log_project Safe-RLHF-PDA \
 	--zero_stage "${ZERO_STAGE}" \
 	--offload "${OFFLOAD}" \
-	--bf16 True \
+	--bf16 False \
 	--tf32 True \
 	--cost_model_name_or_path "${COST_MODEL_NAME_OR_PATH}" \
 	--reward_model_name_or_path "${REWARD_MODEL_NAME_OR_PATH}"
