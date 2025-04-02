@@ -164,40 +164,32 @@ class PdAlignementTrainer(DualTrainer):
         better_log_ratio = better_log_prob - ref_better_log_prob
         worse_log_ratio = worse_log_prob - ref_worse_log_prob
 
-        # DKL loss
-        dkl_loss = -(
-            self.scale_coeff * (better_log_ratio - 1) * torch.exp(better_log_ratio)
-            + self.scale_coeff * (worse_log_ratio - 1) * torch.exp(worse_log_ratio)
+        # lagrangian loss
+        lagrangian_loss = torch.exp(better_log_ratio) * (
+            rewards[:, 0] - self.scale_coeff * better_log_ratio - multipliers[:, 0] * costs[:, 0]
         )
-
-        # Safety loss
-        safety_loss += (
-            -self.args.resilient_coeff
-            / 2
-            * (
-                torch.clamp(
-                    torch.exp(better_log_ratio) * better_safe - self.args.safety_ratio_tol, 0, None
-                )
-                ** 2
-                + torch.clamp(
-                    torch.exp(worse_log_ratio) * worse_safe - self.args.safety_ratio_tol, 0, None
-                )
-                ** 2
-            )
+        lagrangian_loss += torch.exp(worse_log_ratio) * (
+            rewards[:, 1] - self.scale_coeff * worse_log_ratio - multipliers[:, 1] * costs[:, 1]
         )
+        lagrangian_loss += (multipliers**2).sum() / (2 * self.args.resilient_coeff)
+        losses = -lagrangian_loss
 
-        # Helpfullness loss
-        helpfullness_loss = better_log_prob - worse_log_prob
-
-        # Total loss
-        losses = dkl_loss + safety_loss + helpfullness_loss
-        losses = -losses
         loss = losses.mean()
+        slacks = torch.stack([torch.exp(better_log_ratio), torch.exp(worse_log_ratio)], dim=1)
 
         # GET PARTS OF THE LOSS
-        dkl_loss_d = dkl_loss.detach()
-        safety_loss_d = safety_loss.detach()
-        helpfullness_loss_d = helpfullness_loss.detach()
+        dkl_loss = (
+            self.scale_coeff * better_log_ratio * torch.exp(better_log_ratio)
+            + self.scale_coeff * worse_log_ratio * torch.exp(worse_log_ratio)
+        ).detach()
+        reward_loss = -(
+            torch.exp(better_log_ratio) * rewards[:, 0] + torch.exp(worse_log_ratio) * rewards[:, 1]
+        ).detach()
+        cost_loss = (
+            torch.exp(better_log_ratio) * multipliers[:, 0] * costs[:, 0]
+            + torch.exp(worse_log_ratio) * multipliers[:, 1] * costs[:, 1]
+        ).detach()
+        resilience_loss = -((multipliers**2).sum() / (2 * self.args.resilient_coeff)).detach()
 
         # GET RATIOS FOR BETTER, WORSE, SAFE, UNSAFE
         unsafe_sample_ratio = torch.cat(
@@ -209,19 +201,32 @@ class PdAlignementTrainer(DualTrainer):
         better_sample_ratio = better_log_ratio.detach()
         worse_sample_ratio = worse_log_ratio.detach()
 
+        # GET REWARD AVG AND COST
+        reward_avg = (
+            rewards[:, 0] * torch.exp(better_log_ratio) + rewards[:, 1] * torch.exp(worse_log_ratio)
+        ).detach()
+        cost_avg = (
+            costs[:, 0] * torch.exp(better_log_ratio) + costs[:, 1] * torch.exp(worse_log_ratio)
+        ).detach()
+
         # reward = better_sample_reward + worse_sample_reward  # size = (B,)
         # reward_accuracy = (better_sample_ratio > worse_sample_ratio).float().mean()  # size = ()
         # reward_margin = better_sample_reward - worse_sample_reward  # size = (B,)
+        slacks = slacks.to(multipliers.device).detach()  # size = (B,2)
 
         return {
             'loss': loss,
-            'dkl_loss': dkl_loss_d,
-            'safety_loss': safety_loss_d,
-            'helpfullness_loss': helpfullness_loss_d,
+            'dkl_loss': dkl_loss,
+            'reward_loss': reward_loss,
+            'lagrangian_loss': cost_loss,
+            'resilience_loss': resilience_loss,
             'better_sample_ratio': better_sample_ratio,
             'worse_sample_ratio': worse_sample_ratio,
             'unsafe_sample_ratio': unsafe_sample_ratio,
             'safe_sample_ratio': safe_sample_ratio,
+            'reward_avg': reward_avg,
+            'cost_avg': cost_avg,
+            'slacks': slacks,
         }
 
     def dual_step(
@@ -286,31 +291,56 @@ class PdAlignementTrainer(DualTrainer):
         self.model.step()
 
         with torch.no_grad():
+            self.multipliers[index] = self.dual_step(
+                slacks=loss_dict['slacks'], multipliers=batch_multipliers, costs=batch_costs
+            )
 
+            # reward = loss_dict['reward'].mean()
             dkl_loss = loss_dict['dkl_loss'].mean()
-            safety_loss = loss_dict['safety_loss'].mean()
-            helpfullness_loss = loss_dict['helpfullness_loss'].mean()
+            reward_loss = loss_dict['reward_loss'].mean()
+            lagrangian_loss = loss_dict['lagrangian_loss'].mean()
+            resilience_loss = loss_dict['resilience_loss'].mean()
             better_sample_ratio = loss_dict['better_sample_ratio'].mean()
             worse_sample_ratio = loss_dict['worse_sample_ratio'].mean()
             unsafe_sample_ratio = loss_dict['unsafe_sample_ratio'].mean()
             safe_sample_ratio = loss_dict['safe_sample_ratio'].mean()
+            reward_avg = loss_dict['reward_avg'].mean()
+            cost_avg = loss_dict['cost_avg'].mean()
+
+            # better_sample_reward = loss_dict['better_sample_reward'].mean()
+            # worse_sample_reward = loss_dict['worse_sample_reward'].mean()
+            # reward_accuracy = loss_dict['reward_accuracy']
+            # reward_margin = loss_dict['reward_margin'].mean()
 
             loss = get_all_reduce_mean(loss)
             dkl_loss = get_all_reduce_mean(dkl_loss)
-            safety_loss = get_all_reduce_mean(safety_loss)
-            helpfullness_loss = get_all_reduce_mean(helpfullness_loss)
+            reward_loss = get_all_reduce_mean(reward_loss)
+            lagrangian_loss = get_all_reduce_mean(lagrangian_loss)
+            resilience_loss = get_all_reduce_mean(resilience_loss)
             better_sample_ratio = get_all_reduce_mean(better_sample_ratio)
             worse_sample_ratio = get_all_reduce_mean(worse_sample_ratio)
             unsafe_sample_ratio = get_all_reduce_mean(unsafe_sample_ratio)
             safe_sample_ratio = get_all_reduce_mean(safe_sample_ratio)
+            reward_avg = get_all_reduce_mean(reward_avg)
+            cost_avg = get_all_reduce_mean(cost_avg)
+
+            # reward = get_all_reduce_mean(reward)
+            # better_sample_reward = get_all_reduce_mean(better_sample_reward)
+            # worse_sample_reward = get_all_reduce_mean(worse_sample_reward)
+            # reward_accuracy = get_all_reduce_mean(reward_accuracy)
+            # reward_margin = get_all_reduce_mean(reward_margin)
 
         return {
             'train/loss': loss.item(),
             'train/dkl_loss': dkl_loss.item(),
-            'train/safety_loss': safety_loss.item(),
-            'train/helpfullness_loss': helpfullness_loss.item(),
+            'train/reward_loss': reward_loss.item(),
+            'train/lagrangian_loss': lagrangian_loss.item(),
+            'train/resilience_loss': resilience_loss.item(),
             'train/better_sample_ratio': better_sample_ratio.item(),
             'train/worse_sample_ratio': worse_sample_ratio.item(),
             'train/unsafe_sample_ratio': unsafe_sample_ratio.item(),
             'train/safe_sample_ratio': safe_sample_ratio.item(),
+            'train/reward_avg': reward_avg.item(),
+            'train/cost_avg': cost_avg.item(),
+            'train/lr': self.model.optimizer.param_groups[0]['lr'],
         }

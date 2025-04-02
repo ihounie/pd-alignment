@@ -132,6 +132,13 @@ def parse_arguments() -> argparse.Namespace:
         default=0.02,
         help='The coefficient for the KL divergence between the reference and actor policy.',
     )
+
+    training_parser.add_argument(
+        '--safety_ratio_tol',
+        type=float,
+        default=0.1,
+        help='The coefficient for the clipped safety  ration',
+    )
     # Dual args
     training_parser.add_argument(
         '--resilient_coeff',
