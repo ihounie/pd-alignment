@@ -227,11 +227,11 @@ class DualTrainer(TrainerBase):
                 self.costs[batch['index'], 0] = batch['better_safe']
                 self.costs[batch['index'], 1] = batch['worse_safe']
         else:
-            cost_model, _ = load_pretrained_models(
+            cost_model, cost_tokenizer = load_pretrained_models(
                 self.args.cost_model_name_or_path,
                 model_max_length=self.args.max_length,
                 auto_model_type=AutoModelForScore,
-                padding_side='right',
+                padding_side='left',
                 trust_remote_code=self.args.trust_remote_code,
                 auto_model_kwargs={
                     'score_type': 'cost',
@@ -239,20 +239,29 @@ class DualTrainer(TrainerBase):
                 },
             )
 
-            cost_model.set_normalize(self.args.normalize_cost)
+            cost_tokenizer.pad_token = cost_tokenizer.eos_token
             cost_model.requires_grad_(False)
             cost_model.eval()
             cost_model.to(self.args.device)
 
             for batch in tqdm(self.train_dataloader, desc='Computing model costs'):
                 batch = to_device(batch, self.args.device)
+                attention_mask = torch.logical_and(
+                    batch["better_input_ids"].not_equal(cost_tokenizer.pad_token_id),
+                    batch["better_input_ids"].not_equal(cost_tokenizer.unk_token_id),
+                )
                 self.costs[batch['index'], 0] = cost_model(
                     batch["better_input_ids"],
-                    attention_mask=batch["better_attention_mask"],
+                    attention_mask=attention_mask,
                 ).end_scores.squeeze(dim=-1)
+                attention_mask = torch.logical_and(
+                    batch["worse_input_ids"].not_equal(cost_tokenizer.pad_token_id),
+                    batch["worse_input_ids"].not_equal(cost_tokenizer.unk_token_id),
+                )
+
                 self.costs[batch['index'], 1] = cost_model(
                     batch["worse_input_ids"],
-                    attention_mask=batch["worse_attention_mask"],
+                    attention_mask=attention_mask,
                 ).end_scores.squeeze(dim=-1)
 
         # Save computed costs
@@ -287,11 +296,11 @@ class DualTrainer(TrainerBase):
         self.rewards = to_device(self.rewards, self.args.device)
 
         print("Computing rewards...")
-        reward_model, _ = load_pretrained_models(
+        reward_model, reward_tokenizer = load_pretrained_models(
             self.args.reward_model_name_or_path,
             model_max_length=self.args.max_length,
             auto_model_type=AutoModelForScore,
-            padding_side='right',
+            padding_side='left',
             trust_remote_code=self.args.trust_remote_code,
             auto_model_kwargs={
                 'score_type': 'reward',
@@ -299,20 +308,28 @@ class DualTrainer(TrainerBase):
             },
         )
 
-        reward_model.set_normalize(self.args.normalize_reward)
+        reward_tokenizer.pad_token = reward_tokenizer.eos_token
         reward_model.requires_grad_(False)
         reward_model.eval()
         reward_model.to(self.args.device)
 
         for batch in tqdm(self.train_dataloader, desc='Computing rewards'):
             batch = to_device(batch, self.args.device)
+            attention_mask = torch.logical_and(
+                batch["better_input_ids"].not_equal(reward_tokenizer.pad_token_id),
+                batch["better_input_ids"].not_equal(reward_tokenizer.unk_token_id),
+            )
             self.rewards[batch['index'], 0] = reward_model(
                 batch["better_input_ids"],
-                attention_mask=batch["better_attention_mask"],
+                attention_mask=attention_mask,
             ).end_scores.squeeze(dim=-1)
+            attention_mask = torch.logical_and(
+                batch["worse_input_ids"].not_equal(reward_tokenizer.pad_token_id),
+                batch["worse_input_ids"].not_equal(reward_tokenizer.unk_token_id),
+            )
             self.rewards[batch['index'], 1] = reward_model(
                 batch["worse_input_ids"],
-                attention_mask=batch["worse_attention_mask"],
+                attention_mask=attention_mask,
             ).end_scores.squeeze(dim=-1)
 
         # Save computed rewards
