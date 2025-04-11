@@ -116,10 +116,15 @@ class TrainerBase(metaclass=abc.ABCMeta):
         if ds_config is None:
             ds_config = self.ds_config  # pylint: disable=no-member
 
+        # if model is a peft model, merge and unload
+
         self.logger.print(f'Saving model to "{self.args.output_dir}" ...')
 
         output_config_file = os.path.join(self.args.output_dir, CONFIG_NAME)
         model_to_save: PreTrainedModel = getattr(model, 'module', model)
+        if hasattr(model, 'peft_config'):
+            self.logger.print('Merging and unloading PEFT model...')
+            model_to_save = model_to_save.merge_and_unload()
         if is_main_process():
             model_to_save.config.to_json_file(output_config_file)
             self.tokenizer.save_pretrained(self.args.output_dir)

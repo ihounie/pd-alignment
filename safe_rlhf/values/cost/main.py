@@ -339,6 +339,7 @@ def main() -> None:
     )
 
     trainer = CostTrainer(args, ds_config)
+    # trainer.save()
     trainer.train()
     trainer.save()
 

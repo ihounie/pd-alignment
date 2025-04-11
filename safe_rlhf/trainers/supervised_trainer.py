@@ -24,6 +24,7 @@ import deepspeed
 import torch
 import torch.distributed as dist
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -83,6 +84,21 @@ class SupervisedTrainer(TrainerBase):
             auto_model_kwargs=self.extra_model_kwargs,
             auto_tokenizer_kwargs=self.extra_tokenizer_kwargs,
         )
+        self.model = get_peft_model(
+            self.model,
+            LoraConfig(
+                r=32,
+                lora_alpha=16,
+                lora_dropout=0.1,
+                target_modules=None,
+            ),
+        )
+        self.model = self.model.half()
+        # Unfreeze the last Transformer layer
+        for param in self.model.model.score_head.parameters():
+            param.requires_grad = True
+        # for param in self.model.model.normalizer.parameters():
+        #    param.requires_grad = True
 
     def init_datasets(self) -> None:
         """Initialize training and evaluation datasets."""
@@ -189,12 +205,25 @@ class SupervisedTrainer(TrainerBase):
             disable=not is_main_process(),
         )
 
-        if self.args.need_eval:
+        if False:  # self.args.need_eval:
             self.logger.print('\n***** Evaluating at the beginning *****')
             self.logger.log(self.eval(), step=0)
 
         for epoch in range(self.args.epochs):
             self.model.train()
+            for param in self.model.module.score_head.parameters():
+                param.requires_grad = True
+                # print num trainable parameters
+            if epoch == 0:
+                num_trainable_params = sum(
+                    p.numel() for p in self.model.parameters() if p.requires_grad
+                )
+                self.logger.print(f'Number of trainable parameters: {num_trainable_params}')
+                # parameters in model head
+                num_model_head_params = sum(
+                    p.numel() for p in self.model.module.score_head.parameters()
+                )
+                self.logger.print(f'Number of model head parameters: {num_model_head_params}')
 
             for batch in self.train_dataloader:
                 info = self.train_step(**to_device(batch, self.args.device))
@@ -210,7 +239,7 @@ class SupervisedTrainer(TrainerBase):
                 info['train/epoch'] = self.global_step / len(self.train_dataloader)
                 self.logger.log(info, step=self.global_step)
 
-                if self.global_step % self.args.save_interval == 0:
+                if False:  # self.global_step % self.args.save_interval == 0:
                     self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
                     self.model.save_checkpoint(self.args.output_dir, tag=self.global_step)
                     self.logger.print('Checkpoint saved.')
@@ -223,7 +252,11 @@ class SupervisedTrainer(TrainerBase):
                     self.logger.print(f'\n***** Evaluating at step {self.global_step} *****')
                     self.logger.log(self.eval(), step=self.global_step)
 
-            if self.args.need_eval and self.args.eval_strategy == 'epoch':
+            if (
+                epoch == self.args.epochs - 1
+                and self.args.need_eval
+                and self.args.eval_strategy == 'epoch'
+            ):
                 self.logger.print(
                     f'\n***** Evaluating at epoch {epoch + 1}/{self.args.epochs} *****',
                 )
@@ -235,6 +268,8 @@ class SupervisedTrainer(TrainerBase):
         """Set training mode for model."""
         if mode:
             self.model.train()
+            for param in self.model.module.score_head.parameters():
+                param.requires_grad = True
             if self.args.gradient_checkpointing:
                 self.model.gradient_checkpointing_enable()
         else:
