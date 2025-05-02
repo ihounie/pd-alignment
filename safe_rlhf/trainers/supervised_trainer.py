@@ -87,18 +87,28 @@ class SupervisedTrainer(TrainerBase):
         self.model = get_peft_model(
             self.model,
             LoraConfig(
-                r=32,
-                lora_alpha=16,
-                lora_dropout=0.1,
-                target_modules=None,
+                r=self.args.lora_r,
+                lora_alpha=self.args.lora_alpha,
+                lora_dropout=self.args.lora_dropout,
+                target_modules=self.args.lora_target_modules,
             ),
         )
-        self.model = self.model.half()
+        # self.model = self.model.half()
+        self.unfreeze_score_head()
         # Unfreeze the last Transformer layer
-        for param in self.model.model.score_head.parameters():
-            param.requires_grad = True
-        # for param in self.model.model.normalizer.parameters():
-        #    param.requires_grad = True
+
+    def unfreeze_score_head(self) -> None:
+        model = self.model.module if hasattr(self.model, 'module') else self.model.model
+        if hasattr(model, 'score_head'):
+            print("unfreezing score head")
+            for param in model.score_head.parameters():
+                param.requires_grad = True
+        elif hasattr(model, 'score'):
+            print("unfreezing score")
+            for param in model.score.parameters():
+                param.requires_grad = True
+        else:
+            print("no score head or score found")
 
     def init_datasets(self) -> None:
         """Initialize training and evaluation datasets."""
@@ -211,19 +221,24 @@ class SupervisedTrainer(TrainerBase):
 
         for epoch in range(self.args.epochs):
             self.model.train()
-            for param in self.model.module.score_head.parameters():
-                param.requires_grad = True
-                # print num trainable parameters
+            self.unfreeze_score_head()
             if epoch == 0:
                 num_trainable_params = sum(
                     p.numel() for p in self.model.parameters() if p.requires_grad
                 )
                 self.logger.print(f'Number of trainable parameters: {num_trainable_params}')
                 # parameters in model head
-                num_model_head_params = sum(
-                    p.numel() for p in self.model.module.score_head.parameters()
-                )
-                self.logger.print(f'Number of model head parameters: {num_model_head_params}')
+                if hasattr(self.model, 'module'):
+                    if hasattr(self.model.module, 'score_head'):
+                        num_model_head_params = sum(
+                            p.numel() for p in self.model.module.score_head.parameters()
+                        )
+                    elif hasattr(self.model.module, 'score'):
+                        num_model_head_params = sum(
+                            p.numel() for p in self.model.module.score.parameters()
+                        )
+
+                    self.logger.print(f'Number of model head parameters: {num_model_head_params}')
 
             for batch in self.train_dataloader:
                 info = self.train_step(**to_device(batch, self.args.device))
@@ -239,7 +254,7 @@ class SupervisedTrainer(TrainerBase):
                 info['train/epoch'] = self.global_step / len(self.train_dataloader)
                 self.logger.log(info, step=self.global_step)
 
-                if False:  # self.global_step % self.args.save_interval == 0:
+                if self.global_step % self.args.save_interval == 0:
                     self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
                     self.model.save_checkpoint(self.args.output_dir, tag=self.global_step)
                     self.logger.print('Checkpoint saved.')
@@ -253,9 +268,9 @@ class SupervisedTrainer(TrainerBase):
                     self.logger.log(self.eval(), step=self.global_step)
 
             if (
-                epoch == self.args.epochs - 1
-                and self.args.need_eval
+                self.args.need_eval
                 and self.args.eval_strategy == 'epoch'
+                and epoch % self.args.eval_interval == 0
             ):
                 self.logger.print(
                     f'\n***** Evaluating at epoch {epoch + 1}/{self.args.epochs} *****',
@@ -268,8 +283,7 @@ class SupervisedTrainer(TrainerBase):
         """Set training mode for model."""
         if mode:
             self.model.train()
-            for param in self.model.module.score_head.parameters():
-                param.requires_grad = True
+            self.unfreeze_score_head()
             if self.args.gradient_checkpointing:
                 self.model.gradient_checkpointing_enable()
         else:

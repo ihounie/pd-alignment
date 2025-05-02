@@ -12,21 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Trainer base classes."""
 
-from safe_rlhf.trainers.base import TrainerBase
-from safe_rlhf.trainers.dual_trainer import DualTrainer
-from safe_rlhf.trainers.multi_dual_trainer import MultiDualTrainer
-from safe_rlhf.trainers.pref_multi_dual_trainer import PrefMultiDualTrainer
-from safe_rlhf.trainers.rl_trainer import RLTrainer
-from safe_rlhf.trainers.supervised_trainer import SupervisedTrainer
+from safe_rlhf.values.classifier.trainer import MultiClassTrainer
 
 
-__all__ = [
-    'TrainerBase',
-    'RLTrainer',
-    'SupervisedTrainer',
-    'DualTrainer',
-    'MultiDualTrainer',
-    'PrefMultiDualTrainer',
-]
+__all__ = ['MultiClassTrainer']

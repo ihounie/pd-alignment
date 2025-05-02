@@ -27,11 +27,18 @@ ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export LOGLEVEL="${LOGLEVEL:-WARNING}"
 
+export WANDB_ENTITY="alelab"
+
+CACHE_DIR="/home/chiche/pd-alignment/cache/beavertails-12k"
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
-OUTPUT_DIR="${ROOT_DIR}/output/rm"
+COST_MODEL_NAME_OR_PATH="/home/chiche/pd-alignment/output/classifier/google/shieldgemma-2b-5e-4-eos"
+REWARD_MODEL_NAME_OR_PATH="none"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment-${timestamp}"
 unset HOSTFILE
-ZERO_STAGE=3
+ZERO_STAGE=0
 OFFLOAD="none"
+SCALE_COEFF=0.1
 while [[ "$#" -gt 0 ]]; do
 	arg="$1"
 	shift
@@ -71,6 +78,27 @@ while [[ "$#" -gt 0 ]]; do
 		--offload=*)
 			OFFLOAD="${arg#*=}"
 			;;
+		--safety_ratio_tol)
+			SAFETY_RATIO_TOL="$1"
+			shift
+			;;
+		--safety_ratio_tol=*)
+			SAFETY_RATIO_TOL="${arg#*=}"
+			;;
+		--resilient_coeff)
+			RESILIENT_COEFF="$1"
+			shift
+			;;
+		--resilient_coeff=*)
+			RESILIENT_COEFF="${arg#*=}"
+			;;
+		--scale_coeff)
+			SCALE_COEFF="$1"
+			shift
+			;;
+		--scale_coeff=*)
+			SCALE_COEFF="${arg#*=}"
+			;;
 		*)
 			echo "Unknown parameter passed: '${arg}'" >&2
 			exit 1
@@ -85,10 +113,6 @@ if [[ ! -f "${OUTPUT_DIR}/.gitignore" ]]; then
 fi
 
 cp -f "$0" "${OUTPUT_DIR}/script.sh"
-
-if [[ -z "${WANDB_API_KEY}" ]]; then
-	export WANDB_MODE="offline"
-fi
 
 MASTER_PORT_START=10000
 MASTER_PORT_END=65535
@@ -107,34 +131,55 @@ DEEPSPEED_ARGS+=("--master_port" "${MASTER_PORT}")
 
 exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log" >&2)
 
-CUDA_VISIBLE_DEVICES=0 deepspeed "${DEEPSPEED_ARGS[@]}" \
-	--module safe_rlhf.values.reward \
-	--train_datasets PKU-Alignment/PKU-SafeRLHF-30K/train \
-	--eval_datasets PKU-Alignment/PKU-SafeRLHF-30K/test \
-	--model_name_or_path "${MODEL_NAME_OR_PATH}" \
-	--max_length 512 \
-	--trust_remote_code True \
-	--loss_type sequence-wise \
-	--epochs 2 \
-	--per_device_train_batch_size 16 \
-	--per_device_eval_batch_size 16 \
-	--gradient_accumulation_steps 1 \
-	--gradient_checkpointing \
-	--regularization 0.001 \
-	--normalize_score_during_training False \
-	--normalizer_type ExponentialMovingAverage \
-	--normalizer_momentum 0.9 \
-	--learning_rate 2e-5 \
-	--lr_scheduler_type cosine \
-	--lr_warmup_ratio 0.03 \
-	--weight_decay 0.1 \
-	--seed 42 \
-	--need_eval \
-	--eval_strategy epoch \
-	--output_dir "${OUTPUT_DIR}" \
-	--log_type wandb \
-	--log_project Safe-RLHF-RM \
-	--zero_stage "${ZERO_STAGE}" \
-	--offload "${OFFLOAD}" \
-	--bf16 True \
-	--tf32 True
+# Define arrays for thresholds and corresponding lambda initializations
+# Iterate over the pairs
+for threshold in 0.05 0.1 0.025 0.0125  0.00625
+do
+	for lr in 1e-4 # 1e-6 # 1e-5 1e-4 1e-7 1e-8
+	do
+		deepspeed "${DEEPSPEED_ARGS[@]}" \
+		--module safe_rlhf.algorithms.multi_pd_alignment \
+		--cache_dir "${CACHE_DIR}" \
+		--train_datasets ihounie/beavertails-12k-bal:train \
+		--eval_datasets ihounie/beavertails-12k-bal:test \
+		--model_name_or_path "${MODEL_NAME_OR_PATH}" \
+		--max_length 512 \
+		--trust_remote_code True \
+		--epochs 3 \
+		--per_device_train_batch_size 1 \
+		--per_device_eval_batch_size 1 \
+		--eval_batch_size 16 \
+		--gradient_accumulation_steps 16 \
+		--gradient_checkpointing \
+		--learning_rate "${lr}" \
+		--lr_scheduler_type cosine \
+		--lr_warmup_ratio 0.1 \
+		--weight_decay 0.05 \
+		--seed 42 \
+		--need_eval \
+		--eval_strategy epoch \
+		--resilient_coeff 0.0 \
+		--scale_coeff "${SCALE_COEFF}" \
+		--output_dir "${OUTPUT_DIR}" \
+		--log_type wandb \
+		--log_project Safe-RLHF-PDA \
+		--zero_stage "${ZERO_STAGE}" \
+		--offload "${OFFLOAD}" \
+		--bf16 False \
+		--tf32 True \
+		--cost_model_name_or_path "${COST_MODEL_NAME_OR_PATH}" \
+		--reward_model_name_or_path "${REWARD_MODEL_NAME_OR_PATH}" \
+		--eval_at_init False \
+		--compute_kl_eval True \
+		--compute_costs_eval True \
+		--dual_step_size 0.0 \
+		--safety_threshold "${threshold}" \
+		--train_batches_on_eval 10 \
+		--num_batches_dual 2 \
+		--num_responses_for_dual 10 \
+		--num_responses_eval 10 \
+		--sample_responses_for_dual True \
+		--run_closed_form_dual True \
+		--eval_at_init True
+	done
+done

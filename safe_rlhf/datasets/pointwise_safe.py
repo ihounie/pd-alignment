@@ -101,10 +101,23 @@ class PointwiseSafeDataset(TokenizedDataset):
         worse_safe = bool(raw_sample.get('is_other_safe', False))
 
         # Tokenize each field
-        better_input_ids = self.tokenize(
-            prompt_text + better_answer_text + self.tokenizer.eos_token
-        )
-        worse_input_ids = self.tokenize(prompt_text + worse_answer_text + self.tokenizer.eos_token)
+        better_input_ids = self.tokenize(prompt_text + better_answer_text)
+        if (
+            better_input_ids[-1] != self.tokenizer.eos_token_id
+            and len(better_input_ids) < self.tokenizer.model_max_length
+        ):
+            better_input_ids = torch.cat(
+                [better_input_ids, torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)]
+            )
+
+        worse_input_ids = self.tokenize(prompt_text + worse_answer_text)
+        if (
+            worse_input_ids[-1] != self.tokenizer.eos_token_id
+            and len(worse_input_ids) < self.tokenizer.model_max_length
+        ):
+            worse_input_ids = torch.cat(
+                [worse_input_ids, torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)]
+            )
 
         # Compute response index by finding first difference
         min_len = min(len(better_input_ids), len(worse_input_ids))

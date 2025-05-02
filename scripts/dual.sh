@@ -30,7 +30,7 @@ export LOGLEVEL="${LOGLEVEL:-WARNING}"
 export WANDB_ENTITY="alelab"
 
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
-COST_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v1.0-cost"
+COST_MODEL_NAME_OR_PATH="/home/chiche/pd-alignment/output/cm"
 REWARD_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v1.0-reward"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment-${timestamp}"
@@ -40,6 +40,7 @@ OFFLOAD="none"
 SAFETY_RATIO_TOL=0.1
 RESILIENT_COEFF=1.0
 SCALE_COEFF=0.1
+
 while [[ "$#" -gt 0 ]]; do
 	arg="$1"
 	shift
@@ -131,37 +132,42 @@ fi
 DEEPSPEED_ARGS+=("--master_port" "${MASTER_PORT}")
 
 exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log" >&2)
-
-
-CUDA_VISIBLE_DEVICES=0,1 deepspeed "${DEEPSPEED_ARGS[@]}" \
-	--module safe_rlhf.algorithms.pd_alignment \
-	--train_datasets PKU-SafeRLHF/train \
-	--eval_datasets PKU-SafeRLHF/test \
-	--model_name_or_path "${MODEL_NAME_OR_PATH}" \
-	--max_length 512 \
-	--trust_remote_code True \
-	--epochs 1 \
-	--per_device_train_batch_size 1 \
-	--per_device_eval_batch_size 1 \
-	--gradient_accumulation_steps 16 \
-	--gradient_checkpointing \
-	--learning_rate 1e-6 \
-	--lr_scheduler_type cosine \
-	--lr_warmup_ratio 0.03 \
-	--weight_decay 0.05 \
-	--seed 42 \
-	--need_eval \
-	--eval_strategy epoch \
-	--resilient_coeff "${RESILIENT_COEFF}" \
-	--dual_step_size 0.01 \
-	--scale_coeff "${SCALE_COEFF}" \
-	--safety_ratio_tol "${SAFETY_RATIO_TOL}" \
-	--output_dir "${OUTPUT_DIR}" \
-	--log_type wandb \
-	--log_project Safe-RLHF-PDA \
-	--zero_stage "${ZERO_STAGE}" \
-	--offload "${OFFLOAD}" \
-	--bf16 False \
-	--tf32 True \
-	--cost_model_name_or_path "${COST_MODEL_NAME_OR_PATH}" \
-	--reward_model_name_or_path "${REWARD_MODEL_NAME_OR_PATH}"
+for resilient_coeff in 0.1 # 1.0 10.0
+do
+	for lr in 1e-4 # 1e-5 1e-7
+	do
+		CUDA_VISIBLE_DEVICES=0,1 deepspeed "${DEEPSPEED_ARGS[@]}" \
+		--module safe_rlhf.algorithms.pd_alignment \
+		--train_datasets PKU-Alignment/PKU-SafeRLHF-30K/train \
+		--eval_datasets PKU-Alignment/PKU-SafeRLHF-30K/test \
+		--model_name_or_path "${MODEL_NAME_OR_PATH}" \
+		--max_length 512 \
+		--trust_remote_code True \
+		--epochs 3 \
+		--need_eval \
+		--per_device_train_batch_size 1 \
+		--per_device_eval_batch_size 1 \
+		--gradient_accumulation_steps 8 \
+		--gradient_checkpointing \
+		--learning_rate "${lr}" \
+		--lr_scheduler_type cosine \
+		--lr_warmup_ratio 0.001 \
+		--weight_decay 0.05 \
+		--seed 42 \
+		--need_eval \
+		--eval_strategy epoch \
+		--resilient_coeff "${RESILIENT_COEFF}" \
+		--dual_step_size 0.00 \
+		--scale_coeff "${SCALE_COEFF}" \
+		--safety_ratio_tol "${SAFETY_RATIO_TOL}" \
+		--output_dir "${OUTPUT_DIR}" \
+		--log_type wandb \
+		--log_project Safe-RLHF-PDA \
+		--zero_stage "${ZERO_STAGE}" \
+		--offload "${OFFLOAD}" \
+		--bf16 True \
+		--tf32 False\
+		--cost_model_name_or_path "${COST_MODEL_NAME_OR_PATH}" \
+		--reward_model_name_or_path "${REWARD_MODEL_NAME_OR_PATH}"
+	done
+done

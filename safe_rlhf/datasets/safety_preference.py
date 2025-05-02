@@ -81,8 +81,24 @@ class SafetyPreferenceDataset(TokenizedDataset):
             )
 
         # size = (L,)
-        safer_input_ids = self.tokenize(prompt + safer_answer + self.tokenizer.eos_token)
-        unsafer_input_ids = self.tokenize(prompt + unsafer_answer + self.tokenizer.eos_token)
+        safer_input_ids = self.tokenize(prompt + safer_answer)
+        if (
+            safer_input_ids[-1] != self.tokenizer.eos_token_id
+            and len(safer_input_ids) < self.tokenizer.model_max_length
+        ):
+            safer_input_ids = torch.cat(
+                [safer_input_ids, torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)]
+            )
+
+        unsafer_input_ids = self.tokenize(prompt + unsafer_answer)
+        if (
+            unsafer_input_ids[-1] != self.tokenizer.eos_token_id
+            and len(unsafer_input_ids) < self.tokenizer.model_max_length
+        ):
+            unsafer_input_ids = torch.cat(
+                [unsafer_input_ids, torch.tensor([self.tokenizer.eos_token_id], dtype=torch.long)]
+            )
+
         if (
             safer_input_ids.size() == unsafer_input_ids.size()
             and torch.all(torch.eq(safer_input_ids, unsafer_input_ids)).item()

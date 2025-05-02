@@ -29,7 +29,7 @@ from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from safe_rlhf.datasets import PointwiseSafeDataset
 from safe_rlhf.models import load_pretrained_models
 from safe_rlhf.trainers import DualTrainer
-from safe_rlhf.utils import gather_log_probabilities, get_all_reduce_mean
+from safe_rlhf.utils import gather_log_probabilities, get_all_reduce_mean, to_device
 
 
 class PdAlignementTrainer(DualTrainer):
@@ -81,7 +81,7 @@ class PdAlignementTrainer(DualTrainer):
             LoraConfig(
                 r=8,
                 lora_alpha=16,
-                lora_dropout=0.1,
+                lora_dropout=0.05,
                 target_modules=[
                     "q_proj",
                     "k_proj",
@@ -95,15 +95,6 @@ class PdAlignementTrainer(DualTrainer):
             ),
         )
 
-    def init_engines(self) -> None:
-        super().init_engines()
-        '''
-        self.model, *_ = deepspeed.initialize(
-            model=self.model,
-            config=self.ds_eval_config,
-        )
-        '''
-
     @staticmethod
     def compute_log_probs(
         model: AutoModelForCausalLM,
@@ -112,7 +103,7 @@ class PdAlignementTrainer(DualTrainer):
     ) -> torch.Tensor:
         """Compute log probabilities of given sequences."""
         logits = model(input_ids, attention_mask=attention_mask).logits
-        # breakpoint()
+        # #breakpoint()
         return gather_log_probabilities(logits[:, :-1], input_ids[:, 1:])
 
     def loss(  # pylint: disable=too-many-locals
@@ -163,65 +154,110 @@ class PdAlignementTrainer(DualTrainer):
         ref_worse_log_prob = ref_sequence_log_probs[:, 1]
         better_log_ratio = better_log_prob - ref_better_log_prob
         worse_log_ratio = worse_log_prob - ref_worse_log_prob
+        # clamp ratios to avoid nans
+        clamp = 300
+        better_log_ratio = torch.clamp(better_log_ratio, min=-clamp, max=clamp)
+        worse_log_ratio = torch.clamp(worse_log_ratio, min=-clamp, max=clamp)
+        if any(torch.isnan(better_log_ratio)) or any(torch.isnan(worse_log_ratio)):
+            # breakpoint()
+            print("NAN ratio detected")
+            print(f"Better log prob: {better_log_prob}")
+            print(f"Worse log prob: {worse_log_prob}")
+            print(f"Ref better log prob: {ref_better_log_prob}")
+            print(f"Ref worse log prob: {ref_worse_log_prob}")
+            better_log_ratio = torch.nan_to_num(better_log_ratio, nan=-1e4)
+            worse_log_ratio = torch.nan_to_num(worse_log_ratio, nan=-1e4)
 
-        # DKL loss
-        dkl_loss = -(
-            self.scale_coeff * (better_log_ratio - 1) * torch.exp(better_log_ratio)
-            + self.scale_coeff * (worse_log_ratio - 1) * torch.exp(worse_log_ratio)
-        )
-
-        # Safety loss
-        safety_loss = (
-            -self.args.resilient_coeff
-            / 2
-            * (
-                torch.clamp(
-                    torch.exp(better_log_ratio) * better_safe - self.args.safety_ratio_tol, 0, None
-                )
-                ** 2
-                + torch.clamp(
-                    torch.exp(worse_log_ratio) * worse_safe - self.args.safety_ratio_tol, 0, None
-                )
-                ** 2
+        if False:  # self.args.use_supervised:
+            # DKL loss
+            dkl_loss = -(
+                self.scale_coeff * (better_log_ratio - 1) * torch.exp(better_log_ratio)
+                + self.scale_coeff * (worse_log_ratio - 1) * torch.exp(worse_log_ratio)
             )
-        )
 
-        # Helpfullness loss
-        helpfullness_loss = better_log_prob - worse_log_prob
+            # Safety loss
+            safety_loss = (
+                -self.args.resilient_coeff
+                / 2
+                * (
+                    torch.clamp(
+                        torch.exp(better_log_ratio) * better_safe - self.args.safety_ratio_tol,
+                        0,
+                        None,
+                    )
+                    ** 2
+                    + torch.clamp(
+                        torch.exp(worse_log_ratio) * worse_safe - self.args.safety_ratio_tol,
+                        0,
+                        None,
+                    )
+                    ** 2
+                )
+            )
 
-        # Total loss
-        losses = dkl_loss + safety_loss + helpfullness_loss
-        losses = -losses
-        loss = losses.mean()
+            # Helpfullness loss
+            helpfullness_loss = better_log_prob - worse_log_prob
 
-        # GET PARTS OF THE LOSS
-        dkl_loss_d = dkl_loss.detach()
-        safety_loss_d = safety_loss.detach()
-        helpfullness_loss_d = helpfullness_loss.detach()
+            # Total loss
+            losses = dkl_loss + safety_loss + helpfullness_loss
+            losses = -losses
+            loss = losses.mean()
 
-        # GET RATIOS FOR BETTER, WORSE, SAFE, UNSAFE
-        unsafe_sample_ratio = torch.cat(
-            [better_log_ratio[~better_safe], worse_log_ratio[~worse_safe]], dim=0
-        ).detach()
-        safe_sample_ratio = torch.cat(
-            [better_log_ratio[better_safe], worse_log_ratio[worse_safe]], dim=0
-        ).detach()
-        better_sample_ratio = better_log_ratio.detach()
-        worse_sample_ratio = worse_log_ratio.detach()
+            # GET PARTS OF THE LOSS
+            dkl_loss_d = dkl_loss.detach()
+            safety_loss_d = safety_loss.detach()
+            helpfullness_loss_d = helpfullness_loss.detach()
+        else:  # DPO loss
+            if False:
+                # assign with probability proportional to costs
+                label_better = torch.sigmoid(costs[:, 1] - costs[:, 0])
+                # sample bernouli
+                label_better = -1 + 2 * torch.bernoulli(label_better)
+            else:
+                label_better = (costs[:, 0] < costs[:, 1]).long() * 2 - 1
 
-        # reward = better_sample_reward + worse_sample_reward  # size = (B,)
-        # reward_accuracy = (better_sample_ratio > worse_sample_ratio).float().mean()  # size = ()
-        # reward_margin = better_sample_reward - worse_sample_reward  # size = (B,)
+            prob = torch.sigmoid(costs[:, 0] - costs[:, 1])
+
+            # loss = torch.log(torch.sigmoid(self.scale_coeff * (prob*label_better*better_log_ratio-(1-prob)*label_better*worse_log_ratio))).mean()
+            loss = -(
+                (costs[:, 0] - self.scale_coeff) * better_log_ratio
+                + (costs[:, 1] - self.scale_coeff) * worse_log_ratio
+            ).mean()
+            # make sure the loss is not nan
+            if torch.isnan(loss).any():
+                # breakpoint()
+                print(f"Loss is nan at batch")
+            loss = torch.nan_to_num(loss, nan=0.0)
+        with torch.no_grad():
+            # GET RATIOS FOR BETTER, WORSE, SAFE, UNSAFE
+            unsafe_sample_ratio = (better_log_ratio if ~label_better else worse_log_ratio).detach()
+            safe_sample_ratio = (better_log_ratio if label_better else worse_log_ratio).detach()
+            better_sample_ratio = better_log_ratio.detach()
+            worse_sample_ratio = worse_log_ratio.detach()
+            reward_accuracy = (
+                (better_sample_ratio > worse_sample_ratio).float().detach()
+            )  # size = ()
+            # reward_margin = better_sample_reward - worse_sample_reward  # size = (B,)
+            safety_accuracy = (
+                ((label_better * better_log_ratio - label_better * worse_log_ratio) > 0)
+                .float()
+                .detach()
+            )
+            safety_margin = (
+                label_better * better_log_ratio - label_better * worse_log_ratio
+            ).detach()
+            reward_margin = (better_sample_ratio - worse_sample_ratio).detach()
 
         return {
             'loss': loss,
-            'dkl_loss': dkl_loss_d,
-            'safety_loss': safety_loss_d,
-            'helpfullness_loss': helpfullness_loss_d,
+            'reward_accuracy': reward_accuracy,
+            'safety_accuracy': safety_accuracy,
             'better_sample_ratio': better_sample_ratio,
             'worse_sample_ratio': worse_sample_ratio,
             'unsafe_sample_ratio': unsafe_sample_ratio,
             'safe_sample_ratio': safe_sample_ratio,
+            'reward_margin': reward_margin,
+            'safety_margin': safety_margin,
         }
 
     def dual_step(
@@ -230,7 +266,7 @@ class PdAlignementTrainer(DualTrainer):
         multipliers: torch.Tensor,
         costs: torch.Tensor,
     ):
-        # breakpoint()
+        # #breakpoint()
         multipliers = multipliers + self.args.dual_step_size * (
             slacks - 1 / (2 * self.args.resilient_coeff) * multipliers
         )
@@ -238,6 +274,55 @@ class PdAlignementTrainer(DualTrainer):
         multipliers = multipliers * (costs > 0).float()
         multipliers = torch.clamp(multipliers, min=0)
         return multipliers
+
+    def eval(self, num_batches: int = 30) -> dict[str, Any]:
+        """Evaluate the model."""
+        # do a forward pass of 10 batches of the train_dataloader
+        # and check if the logprobs match the reference model
+        self.model.eval()
+        counter = 0
+        for batch in self.train_dataloader:
+            batch = to_device(batch, self.args.device)
+            ref_log_prob = self.baseline_logprobs[batch['index']]
+            better_log_prob = (
+                self.compute_log_probs(
+                    self.model.module,
+                    batch['better_input_ids'],
+                    batch['better_attention_mask'],
+                )
+                * batch['better_attention_mask'][:, 1:]
+                * batch['response_masks'][:, 1:]
+            ).sum(dim=1)
+            worse_log_prob = (
+                self.compute_log_probs(
+                    self.model.module,
+                    batch['worse_input_ids'],
+                    batch['worse_attention_mask'],
+                )
+                * batch['worse_attention_mask'][:, 1:]
+                * batch['response_masks'][:, 1:]
+            ).sum(dim=1)
+            counter += 1
+            try:
+                assert torch.allclose(better_log_prob, ref_log_prob[:, 0])
+                assert torch.allclose(worse_log_prob, ref_log_prob[:, 1])
+            except:
+                print(f"Better log prob: {better_log_prob}")
+                print(f"Worse log prob: {worse_log_prob}")
+                print(f"Ref better log prob: {ref_log_prob[:,0]}")
+                print(f"Ref worse log prob: {ref_log_prob[:,1]}")
+            if counter > 10:
+                break
+        # log multiplier stats
+        multipliers = self.multipliers.detach().cpu().numpy()
+        # zeros, max, min, mean, median, std
+        multiplier_stats = {
+            'zeros': (multipliers == 0).mean(),
+            'max': multipliers.max(),
+            'mean': multipliers.mean(),
+            'std': multipliers.std(),
+        }
+        return multiplier_stats
 
     def train_step(
         self,
@@ -267,6 +352,7 @@ class PdAlignementTrainer(DualTrainer):
         batch_costs = self.costs[index]
         batch_rewards = self.rewards[index]
         batch_ref_sequence_log_probs = self.baseline_logprobs[index]
+        ##breakpoint()
 
         loss_dict = self.loss(
             better_input_ids=better_input_ids,
@@ -284,33 +370,34 @@ class PdAlignementTrainer(DualTrainer):
         loss = loss_dict['loss']
         self.model.backward(loss)
         self.model.step()
-
         with torch.no_grad():
-
-            dkl_loss = loss_dict['dkl_loss'].mean()
-            safety_loss = loss_dict['safety_loss'].mean()
-            helpfullness_loss = loss_dict['helpfullness_loss'].mean()
+            reward_accuracy = loss_dict['reward_accuracy'].mean()
+            safety_accuracy = loss_dict['safety_accuracy'].mean()
             better_sample_ratio = loss_dict['better_sample_ratio'].mean()
             worse_sample_ratio = loss_dict['worse_sample_ratio'].mean()
             unsafe_sample_ratio = loss_dict['unsafe_sample_ratio'].mean()
             safe_sample_ratio = loss_dict['safe_sample_ratio'].mean()
+            reward_margin = loss_dict['reward_margin'].mean()
+            safety_margin = loss_dict['safety_margin'].mean()
 
             loss = get_all_reduce_mean(loss)
-            dkl_loss = get_all_reduce_mean(dkl_loss)
-            safety_loss = get_all_reduce_mean(safety_loss)
-            helpfullness_loss = get_all_reduce_mean(helpfullness_loss)
+            reward_accuracy = get_all_reduce_mean(reward_accuracy)
+            safety_accuracy = get_all_reduce_mean(safety_accuracy)
             better_sample_ratio = get_all_reduce_mean(better_sample_ratio)
             worse_sample_ratio = get_all_reduce_mean(worse_sample_ratio)
             unsafe_sample_ratio = get_all_reduce_mean(unsafe_sample_ratio)
             safe_sample_ratio = get_all_reduce_mean(safe_sample_ratio)
+            reward_margin = get_all_reduce_mean(reward_margin)
+            safety_margin = get_all_reduce_mean(safety_margin)
 
         return {
             'train/loss': loss.item(),
-            'train/dkl_loss': dkl_loss.item(),
-            'train/safety_loss': safety_loss.item(),
-            'train/helpfullness_loss': helpfullness_loss.item(),
+            'train/reward_accuracy': reward_accuracy.item(),
+            'train/safety_accuracy': safety_accuracy.item(),
             'train/better_sample_ratio': better_sample_ratio.item(),
             'train/worse_sample_ratio': worse_sample_ratio.item(),
             'train/unsafe_sample_ratio': unsafe_sample_ratio.item(),
             'train/safe_sample_ratio': safe_sample_ratio.item(),
+            'train/reward_margin': reward_margin.item(),
+            'train/safety_margin': safety_margin.item(),
         }

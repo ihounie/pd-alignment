@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from transformers import (
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
     AutoTokenizer,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -156,7 +157,9 @@ def load_pretrained_models(  # pylint: disable=too-many-arguments
     *,
     cache_dir: str | os.PathLike | None = None,
     trust_remote_code: bool = False,
-    auto_model_type: type[AutoModelForCausalLM | AutoModelForScore] = AutoModelForCausalLM,
+    auto_model_type: type[
+        AutoModelForCausalLM | AutoModelForSequenceClassification | AutoModelForScore
+    ] = AutoModelForCausalLM,
     auto_model_args: tuple[Any, ...] = (),
     auto_model_kwargs: dict[str, Any] | None = None,
     auto_tokenizer_args: tuple[Any, ...] = (),

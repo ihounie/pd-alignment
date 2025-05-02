@@ -112,7 +112,7 @@ class PdAlignementTrainer(DualTrainer):
     ) -> torch.Tensor:
         """Compute log probabilities of given sequences."""
         logits = model(input_ids, attention_mask=attention_mask).logits
-        # breakpoint()
+        # #breakpoint()
         return gather_log_probabilities(logits[:, :-1], input_ids[:, 1:])
 
     def loss(  # pylint: disable=too-many-locals
@@ -235,7 +235,7 @@ class PdAlignementTrainer(DualTrainer):
         multipliers: torch.Tensor,
         costs: torch.Tensor,
     ):
-        # breakpoint()
+        # #breakpoint()
         multipliers = multipliers + self.args.dual_step_size * (
             slacks - 1 / (2 * self.args.resilient_coeff) * multipliers
         )

@@ -29,6 +29,18 @@ from safe_rlhf.datasets.base import (
     TokenizedDataset,
     parse_dataset,
 )
+from safe_rlhf.datasets.multiclass_safety import (
+    MultiClassSafetyBatch,
+    MultiClassSafetyCollator,
+    MultiClassSafetyDataset,
+    MultiClassSafetySample,
+)
+from safe_rlhf.datasets.multiclass_supervised import (
+    MultiClassSupervisedBatch,
+    MultiClassSupervisedCollator,
+    MultiClassSupervisedDataset,
+    MultiClassSupervisedSample,
+)
 from safe_rlhf.datasets.pointwise_safe import (
     PointwiseSafeBatch,
     PointwiseSafeCollator,
@@ -40,6 +52,12 @@ from safe_rlhf.datasets.preference import (
     PreferenceCollator,
     PreferenceDataset,
     PreferenceSample,
+)
+from safe_rlhf.datasets.preference_cost import (
+    PreferenceCostBatch,
+    PreferenceCostCollator,
+    PreferenceCostDataset,
+    PreferenceCostSample,
 )
 from safe_rlhf.datasets.prompt_only import (
     PromptOnlyBatch,
@@ -89,6 +107,18 @@ __all__ = [
     'PointwiseSafeCollator',
     'PointwiseSafeSample',
     'PointwiseSafeBatch',
+    'MultiClassSupervisedDataset',
+    'MultiClassSupervisedCollator',
+    'MultiClassSupervisedSample',
+    'MultiClassSupervisedBatch',
+    'MultiClassSafetyDataset',
+    'MultiClassSafetyCollator',
+    'MultiClassSafetySample',
+    'MultiClassSafetyBatch',
+    'PreferenceCostDataset',
+    'PreferenceCostCollator',
+    'PreferenceCostSample',
+    'PreferenceCostBatch',
     *raw.__all__,
 ]
 

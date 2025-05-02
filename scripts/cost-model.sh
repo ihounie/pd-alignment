@@ -30,7 +30,7 @@ export LOGLEVEL="${LOGLEVEL:-WARNING}"
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
 OUTPUT_DIR="${ROOT_DIR}/output/cm"
 unset HOSTFILE
-ZERO_STAGE=3
+ZERO_STAGE=0
 OFFLOAD="none"
 while [[ "$#" -gt 0 ]]; do
 	arg="$1"
@@ -86,9 +86,6 @@ fi
 
 cp -f "$0" "${OUTPUT_DIR}/script.sh"
 
-if [[ -z "${WANDB_API_KEY}" ]]; then
-	export WANDB_MODE="offline"
-fi
 
 MASTER_PORT_START=10000
 MASTER_PORT_END=65535
@@ -107,19 +104,18 @@ DEEPSPEED_ARGS+=("--master_port" "${MASTER_PORT}")
 
 exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log" >&2)
 
-deepspeed "${DEEPSPEED_ARGS[@]}" \
+CUDA_VISIBLE_DEVICES=1 WANDB_MODE=online deepspeed "${DEEPSPEED_ARGS[@]}" \
 	--module safe_rlhf.values.cost \
-	--train_datasets PKU-SafeRLHF/train \
-	--eval_datasets PKU-SafeRLHF/test \
+	--train_datasets PKU-Alignment/PKU-SafeRLHF-30K/train \
+	--eval_datasets PKU-Alignment/PKU-SafeRLHF-30K/test \
 	--model_name_or_path "${MODEL_NAME_OR_PATH}" \
 	--max_length 512 \
 	--trust_remote_code True \
 	--loss_type sequence-wise \
 	--epochs 2 \
-	--per_device_train_batch_size 16 \
-	--per_device_eval_batch_size 16 \
-	--gradient_accumulation_steps 1 \
-	--gradient_checkpointing \
+	--per_device_train_batch_size 4 \
+	--per_device_eval_batch_size 4 \
+	--gradient_accumulation_steps 4 \
 	--regularization 0.001 \
 	--normalize_score_during_training False \
 	--normalizer_type ExponentialMovingAverage \

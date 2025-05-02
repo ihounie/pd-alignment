@@ -57,7 +57,13 @@ class SupervisedDataset(TokenizedDataset):
                 raise ValueError(f'Unsupported type of `input`: {type(input)}. Expected: str.')
             prompt = format_prompt(input=input, eos_token=self.tokenizer.eos_token)
             answer = raw_sample['answer']
-            text = prompt + answer + self.tokenizer.eos_token
+            text = prompt + answer
+            input_ids = self.tokenize(text)
+            if (
+                input_ids[-1] != self.tokenizer.eos_token_id
+                and len(input_ids) < self.tokenizer.model_max_length
+            ):
+                input_ids.append(self.tokenizer.eos_token_id)
 
             input_ids = self.tokenize(text)
             labels = input_ids.clone()

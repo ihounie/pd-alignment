@@ -221,7 +221,23 @@ class TokenizedDataset(Dataset[Dict[str, torch.Tensor]]):
         seed: int = 42,
     ) -> None:
         if not isinstance(dataset_names_and_attributes, dict):
-            dataset_names_and_attributes = tuple(dataset_names_and_attributes)
+            # Check if it's already an iterable of tuples/lists
+            if not hasattr(dataset_names_and_attributes, '__iter__') or isinstance(
+                dataset_names_and_attributes, (str, bytes)
+            ):
+                # Convert single string or non-iterable to a tuple with default attributes (1.0 proportion)
+                dataset_names_and_attributes = ((dataset_names_and_attributes, 1.0),)
+            else:
+                # Ensure each element is a tuple with name and attributes
+                processed_items = []
+                for item in dataset_names_and_attributes:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        processed_items.append(item)
+                    else:
+                        # If an item isn't a proper tuple, assume it's a name with default attributes
+                        processed_items.append((item, 1.0))
+                dataset_names_and_attributes = tuple(processed_items)
+
             dataset_names = [name for name, _ in dataset_names_and_attributes]
             if len(dataset_names) != len(set(dataset_names)):
                 raise ValueError(

@@ -29,7 +29,7 @@ from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, get_scheduler
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, get_scheduler
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
 from safe_rlhf.configs import ADAM_BETAS
@@ -39,7 +39,7 @@ from safe_rlhf.trainers.base import TrainerBase
 from safe_rlhf.utils import get_optimizer_grouped_parameters, is_main_process, to_device
 
 
-class DualTrainer(TrainerBase):
+class PrefMultiDualTrainer(TrainerBase):
     """Trainer base class for supervised training.
 
     Abstract methods:
@@ -80,20 +80,22 @@ class DualTrainer(TrainerBase):
         self.init_rewards()
         dist.barrier()
 
-        print("initializing models ...")
-        self.init_models()
-        dist.barrier()
         print("calculating baseline ...")
         self.init_baseline()
         dist.barrier()
+
+        print("initializing multipliers ...")
+        self.init_multipliers()
+        dist.barrier()
+
         print("initializing engines ...")
         self.init_engines()
         dist.barrier()
+
         print("initializing logger ...")
         self.init_logger()
         dist.barrier()
-        print("initializing multipliers ...")
-        self.init_multipliers()
+
         print("initialization done")
 
     def init_tokenizer(self) -> None:
@@ -127,16 +129,30 @@ class DualTrainer(TrainerBase):
         )
 
     def init_multipliers(self) -> None:
-        self.multipliers = self.args.dual_step_size * self.costs.clone()
+        print(f"Initializing multipliers with {self.args.dual_init}")
+        self.multipliers = torch.tensor(self.args.dual_init)
         # clamp to 0
         self.multipliers = torch.clamp(self.multipliers, min=0)
+        self.multipliers = to_device(self.multipliers, self.args.device)
         return
 
     def init_baseline(self) -> None:
         """Initialize baseline log probabilities with caching functionality."""
         # Create cache directory if it doesn't exist
         os.makedirs(self.args.cache_dir, exist_ok=True)
-        baseline_cache_path = os.path.join(self.args.cache_dir, "cached_baseline_logprobs.pt")
+        baseline_cache_path = os.path.join(self.args.cache_dir, "cached_baseline_logprobs_pref.pt")
+
+        if self.args.compute_kl_eval:
+            reference_model, _ = load_pretrained_models(
+                self.args.model_name_or_path,
+                model_max_length=self.args.max_length,
+                padding_side='left',
+                auto_model_type=AutoModelForCausalLM,
+                trust_remote_code=self.args.trust_remote_code,
+            )
+            reference_model.requires_grad_(False)
+            reference_model.eval()
+            self.reference_model = reference_model
 
         # Load cached baseline if available and not recomputing
         if os.path.exists(baseline_cache_path) and not self.args.recompute_baseline:
@@ -147,10 +163,13 @@ class DualTrainer(TrainerBase):
 
         # If we need to compute baseline logprobs
         print("Computing baseline logprobs...")
-
+        if self.train_dataloader.dataset.num_respones != 1:
+            raise NotImplementedError(
+                "Baseline logprob computation is not implemented for multi-response datasets"
+            )
         # Initialize baseline tensor
-        self.baseline_logprobs = 10 * torch.ones(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones),
+        self.baseline_logprobs = torch.zeros(
+            (len(self.train_dataloader.dataset)),
             dtype=self.model.dtype,
         )
         self.baseline_logprobs = to_device(self.baseline_logprobs, self.args.device)
@@ -159,16 +178,15 @@ class DualTrainer(TrainerBase):
         reference_model, _ = load_pretrained_models(
             self.args.model_name_or_path,
             model_max_length=self.args.max_length,
-            padding_side='right',
-            auto_model_type=self.MODEL_TYPE,
+            padding_side='left',
+            auto_model_type=AutoModelForCausalLM,
             trust_remote_code=self.args.trust_remote_code,
-            auto_model_kwargs=self.extra_model_kwargs,
-            auto_tokenizer_kwargs=self.extra_tokenizer_kwargs,
         )
         reference_model.requires_grad_(False)
         reference_model.eval()
         reference_model.to(self.args.device)
 
+        # Compute logprobs for each batch
         # Compute logprobs for each batch
         for batch in tqdm(self.train_dataloader, desc='Computing baseline logprobs'):
             batch = to_device(batch, self.args.device)
@@ -199,168 +217,18 @@ class DualTrainer(TrainerBase):
         print(f"Saving computed baseline logprobs to {baseline_cache_path}")
         torch.save(self.baseline_logprobs, baseline_cache_path)
         print("Saved baseline logprobs successfully")
-
         # Free up memory
         del reference_model
         torch.cuda.empty_cache()
         return
 
-    def init_costs(self) -> None:
-        """Initialize costs with caching functionality."""
-        # Create cache directory if it doesn't exist
-        os.makedirs(self.args.cache_dir, exist_ok=True)
-        costs_cache_path = os.path.join(self.args.cache_dir, "cached_costs_v1.pt")
-
-        # Load cached costs if available and not recomputing
-        if os.path.exists(costs_cache_path) and not self.args.recompute_costs:
-            print(f"Loading cached costs from {costs_cache_path}")
-            self.costs = torch.load(costs_cache_path, map_location=self.args.device)
-            print("Loaded cached costs successfully")
-            return
-
-        # If we need to compute costs
-        # Initialize costs tensor
-        self.costs = torch.zeros(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones)
-        )
-        self.costs = to_device(self.costs, self.args.device)
-        print("Computing costs...")
-        if self.args.cost_model_name_or_path == "indicator":
-            for batch in tqdm(self.train_dataloader, desc='Computing indicator costs'):
-                self.costs[batch['index'], 0] = batch['better_safe']
-                self.costs[batch['index'], 1] = batch['worse_safe']
-        else:
-            print("Loading cost model...")
-            print(self.args.cost_model_name_or_path)
-            cost_model, cost_tokenizer = load_pretrained_models(
-                self.args.cost_model_name_or_path,
-                model_max_length=self.args.max_length,
-                auto_model_type=AutoModelForScore,
-                padding_side='right',
-                trust_remote_code=self.args.trust_remote_code,
-                auto_model_kwargs={
-                    'score_type': 'cost',
-                    'do_normalize': False,  # self.args.normalize_cost,
-                },
-            )
-            if False:
-                cost_tokenizer.pad_token = cost_tokenizer.eos_token
-            cost_model.requires_grad_(False)
-            cost_model.eval()
-            cost_model.to(self.args.device)
-
-            for batch in tqdm(self.train_dataloader, desc='Computing model costs'):
-                batch = to_device(batch, self.args.device)
-                if False:
-                    attention_mask = torch.logical_and(
-                        batch["better_input_ids"].not_equal(cost_tokenizer.pad_token_id),
-                        batch["better_input_ids"].not_equal(cost_tokenizer.unk_token_id),
-                    )
-                    self.costs[batch['index'], 0] = cost_model(
-                        batch["better_input_ids"],
-                        attention_mask=attention_mask,
-                    ).end_scores.squeeze(dim=-1)
-                    attention_mask = torch.logical_and(
-                        batch["worse_input_ids"].not_equal(cost_tokenizer.pad_token_id),
-                        batch["worse_input_ids"].not_equal(cost_tokenizer.unk_token_id),
-                    )
-
-                    self.costs[batch['index'], 1] = cost_model(
-                        batch["worse_input_ids"],
-                        attention_mask=attention_mask,
-                    ).end_scores.squeeze(dim=-1)
-                else:
-                    self.costs[batch['index'], 0] = cost_model(
-                        batch["better_input_ids"],
-                        attention_mask=batch["better_attention_mask"],
-                    ).end_scores.squeeze(dim=-1)
-                    self.costs[batch['index'], 1] = cost_model(
-                        batch["worse_input_ids"],
-                        attention_mask=batch["worse_attention_mask"],
-                    ).end_scores.squeeze(dim=-1)
-
-        # Save computed costs
-        print(f"Saving computed costs to {costs_cache_path}")
-        torch.save(self.costs, costs_cache_path)
-        print("Saved costs successfully")
-        # Free up memory
-        del cost_model
-        torch.cuda.empty_cache()
-        return
-
-    def init_rewards(self) -> None:
-        """Initialize rewards with caching functionality."""
-
-        # Create cache directory if it doesn't exist
-        os.makedirs(self.args.cache_dir, exist_ok=True)
-        rewards_cache_path = os.path.join(self.args.cache_dir, "cached_rewards_v1.pt")
-
-        # Load cached rewards if available and not recomputing
-        if os.path.exists(rewards_cache_path) and not self.args.recompute_rewards:
-            print(f"Loading cached rewards from {rewards_cache_path}")
-            self.rewards = torch.load(rewards_cache_path, map_location=self.args.device)
-            print("Loaded cached rewards successfully")
-            return
-
-        # If we need to compute rewards
-
-        # Initialize rewards tensor
-        self.rewards = torch.zeros(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones)
-        )
-        self.rewards = to_device(self.rewards, self.args.device)
-
-        print("Computing rewards...")
-        reward_model, reward_tokenizer = load_pretrained_models(
-            self.args.reward_model_name_or_path,
-            model_max_length=self.args.max_length,
-            auto_model_type=AutoModelForScore,
-            padding_side='left',
-            trust_remote_code=self.args.trust_remote_code,
-            auto_model_kwargs={
-                'score_type': 'reward',
-                'do_normalize': self.args.normalize_reward,
-            },
-        )
-
-        reward_tokenizer.pad_token = reward_tokenizer.eos_token
-        reward_model.requires_grad_(False)
-        reward_model.eval()
-        reward_model.to(self.args.device)
-
-        for batch in tqdm(self.train_dataloader, desc='Computing rewards'):
-            batch = to_device(batch, self.args.device)
-            attention_mask = torch.logical_and(
-                batch["better_input_ids"].not_equal(reward_tokenizer.pad_token_id),
-                batch["better_input_ids"].not_equal(reward_tokenizer.unk_token_id),
-            )
-            self.rewards[batch['index'], 0] = reward_model(
-                batch["better_input_ids"],
-                attention_mask=attention_mask,
-            ).end_scores.squeeze(dim=-1)
-            attention_mask = torch.logical_and(
-                batch["worse_input_ids"].not_equal(reward_tokenizer.pad_token_id),
-                batch["worse_input_ids"].not_equal(reward_tokenizer.unk_token_id),
-            )
-            self.rewards[batch['index'], 1] = reward_model(
-                batch["worse_input_ids"],
-                attention_mask=attention_mask,
-            ).end_scores.squeeze(dim=-1)
-
-        # Save computed rewards
-        print(f"Saving computed rewards to {rewards_cache_path}")
-        torch.save(self.rewards, rewards_cache_path)
-        print("Saved rewards successfully")
-        # Free up memory
-        del reward_model
-        torch.cuda.empty_cache()
-        return
-
-    def init_datasets(self) -> None:
+    def init_datasets(self, tokenizer=None) -> None:
         """Initialize training and evaluation datasets."""
+        if tokenizer is None:
+            tokenizer = self.tokenizer
         train_dataset = self.DATASET_TYPE(
             self.args.train_datasets,
-            tokenizer=self.tokenizer,
+            tokenizer=tokenizer,
             lazy_tokenization=False,
             seed=42,
         )
@@ -371,8 +239,7 @@ class DualTrainer(TrainerBase):
                 )
             elif self.args.eval_datasets is not None and self.args.eval_split_ratio is None:
                 eval_dataset = self.DATASET_TYPE(
-                    self.args.eval_datasets,
-                    tokenizer=self.tokenizer,
+                    self.args.eval_datasets, tokenizer=tokenizer, lazy_tokenization=False, seed=42
                 )
             else:
                 raise ValueError('Either `eval_datasets` or `eval_split_ratio` should be provided.')
@@ -428,6 +295,13 @@ class DualTrainer(TrainerBase):
             num_training_steps=self.args.total_training_steps,
         )
 
+        # Add gradient clipping to DeepSpeed configuration
+        if hasattr(self.args, 'gradient_clipping') and self.args.gradient_clipping > 0:
+            self.ds_config['gradient_clipping'] = self.args.gradient_clipping
+        elif not self.ds_config.get('gradient_clipping', None):
+            # Default value if not specified
+            self.ds_config['gradient_clipping'] = 1.0
+
         self.model, *_ = deepspeed.initialize(
             model=self.model,
             optimizer=optimizer,
@@ -455,6 +329,90 @@ class DualTrainer(TrainerBase):
         """Perform a single dual step."""
         raise NotImplementedError
 
+    def eval(self) -> dict[str, Any]:
+        """Evaluate the model."""
+        eval_dict = self.run_eval(self.eval_dataloader, prefix="eval/test")
+        if self.args.train_batches_on_eval > 0:
+            train_dict = self.run_eval(
+                self.train_dataloader,
+                prefix="eval/train",
+                num_batches=self.args.train_batches_on_eval,
+            )
+            eval_dict = {**eval_dict, **train_dict}
+        return eval_dict
+
+    def run_eval(
+        self, eval_dataloader: DataLoader, prefix: str = "eval", num_batches: int = None
+    ) -> dict[str, Any]:
+        """Evaluate the model."""
+        # sample one response from the model over the whole eval dataset
+        # evaluate the cost model on the sampled responses
+        all_costs = []
+        all_kl_divs = []
+        with torch.no_grad():
+            ref_model = to_device(self.reference_model, self.args.device)
+            cost_model = to_device(self.cost_model, self.args.device)
+            batch_count = 0
+            for batch in tqdm(eval_dataloader, desc='Evaluating model'):
+                batch = to_device(batch, self.args.device)
+                if batch["input_ids"].shape[0] != 1:
+                    raise NotImplementedError("Batch size should be 1 for evaluation for now")
+                response_start = (
+                    (batch["response_mask"][0] == 1).nonzero(as_tuple=True)[0][0].item()
+                )
+                prompt = batch["input_ids"][:, :response_start]
+                generated_ids = self.model.generate(
+                    prompt,
+                    attention_mask=batch["attention_mask"],
+                    max_length=self.args.max_length,
+                    do_sample=True,
+                    num_return_sequences=1,
+                )
+                # evaluate sequence logprobs of the generated responses
+                logprobs = self.compute_log_probs(
+                    self.model, generated_ids, batch["attention_mask"]
+                )
+                sequence_logprobs = logprobs.sum(dim=1)
+                # evaluate sequence logprobs of the generated responses for the reference model
+                reference_logprobs = self.compute_log_probs(
+                    ref_model, generated_ids, batch["attention_mask"]
+                )
+                reference_sequence_logprobs = reference_logprobs.sum(dim=1)
+                # evaluate KL divergence between the sequence logprobs
+                kl_div = (sequence_logprobs - reference_sequence_logprobs).mean()
+                # torch.nn.functional.kl_div(sequence_logprobs, reference_sequence_logprobs, reduction='none', log_target=True)
+                all_kl_divs.append(kl_div.cpu().unsqueeze(0))
+                # evaluate the cost model on the sampled responses
+                answer = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                answer = [a.replace("BEGINNING OF CONVERSATION: USER: ", "") for a in answer]
+                answer = [a.replace("ASSISTANT:", "") for a in answer]
+                tokenized_answer = self.cost_tokenizer(
+                    answer, return_tensors="pt", padding=True, truncation=True
+                ).to(self.args.device)
+                outputs = cost_model(
+                    tokenized_answer["input_ids"], attention_mask=tokenized_answer["attention_mask"]
+                )
+                probs = torch.softmax(outputs.logits, dim=-1)
+                all_costs.append(probs.cpu())
+                batch_count += 1
+                if num_batches is not None and batch_count >= num_batches:
+                    break
+        all_costs = torch.cat(all_costs, dim=0)
+        all_kl_divs = torch.cat(all_kl_divs, dim=0)
+        # average costs over responses
+        all_costs = all_costs.mean(dim=0)
+        all_kl_divs = all_kl_divs.mean()
+        # get slacks
+        slacks = all_costs - self.args.safety_threshold
+        cost_dict = {f'{prefix}/cost[{i}]': cost.item() for i, cost in enumerate(all_costs)}
+        slack_dict = {f'{prefix}/slack[{i}]': slack.item() for i, slack in enumerate(slacks)}
+        multiplier_dict = {
+            f'{prefix}/multiplier[{i}]': m.item() for i, m in enumerate(self.multipliers)
+        }
+        kl_dict = {f'{prefix}/kl_div': all_kl_divs.item()}
+
+        return {**cost_dict, **slack_dict, **multiplier_dict, **kl_dict}
+
     def train(self) -> None:
         """Train the model."""
         self.logger.print('***** Running training *****')
@@ -467,9 +425,11 @@ class DualTrainer(TrainerBase):
             disable=not is_main_process(),
         )
 
-        if self.args.need_eval:
+        if self.args.need_eval and self.args.eval_at_init:
             self.logger.print('\n***** Evaluating at the beginning *****')
-            self.logger.log(self.eval(), step=0)
+            # only eval on the main process
+            if is_main_process():
+                self.logger.log(self.eval(), step=0)
         for epoch in range(self.args.epochs):
             self.model.train()
 
@@ -477,12 +437,13 @@ class DualTrainer(TrainerBase):
 
                 info = self.train_step(**to_device(batch, self.args.device))
 
-                torch.cuda.empty_cache()
-
                 self.global_step += 1
                 progress_bar.set_description(
                     f'Training {epoch + 1}/{self.args.epochs} epoch '
-                    f'(loss {info["train/loss"]:.4f})',
+                    + f'(loss {info["train/loss"]:.4f})'
+                    + f'dkl_loss {info["train/dkl_loss"]:.4f}'
+                    + f'safety_loss {info["train/safety_loss"]:.4f}'
+                    + f'importance_weights {info["train/importance_weights"]:.4f}',
                 )
                 progress_bar.update(1)
 
@@ -506,7 +467,9 @@ class DualTrainer(TrainerBase):
                 self.logger.print(
                     f'\n***** Evaluating at epoch {epoch + 1}/{self.args.epochs} *****',
                 )
-                self.logger.log(self.eval(), step=self.global_step)
+                # only eval on the main process
+                if is_main_process():
+                    self.logger.log(self.eval(), step=self.global_step)
 
             self.model.tput_timer.update_epoch_count()
 
