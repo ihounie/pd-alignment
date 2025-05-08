@@ -143,7 +143,8 @@ class MultiPdAlignementTrainer(MultiDualTrainer):
         ).sum()
 
         # Total loss
-        losses = dkl_loss + safety_loss
+        # 
+        losses = safety_loss + dkl_loss
         # losses = -losses
         loss = losses.mean()
 
@@ -151,14 +152,19 @@ class MultiPdAlignementTrainer(MultiDualTrainer):
         dkl_loss_d = dkl_loss.detach()
         safety_loss_d = safety_loss.detach()
         # breakpoint()
+        infeasible = ((costs - self.args.safety_threshold) > 0).any(dim=-1).float()
+        feasible = 1 - infeasible
 
         return {
             'loss': loss,
             'dkl_loss': dkl_loss_d,
             'safety_loss': safety_loss_d,
             'importance_weights': importance_weights,
-            'costs': (costs * importance_weights).mean().item(),
-            'rewards': (rewards * importance_weights).mean().item(),
+            'costs': (costs * importance_weights).mean().detach(),
+            'rewards': (rewards * importance_weights).mean().detach(),
+            'importance_infeasible': (importance_weights* infeasible).mean().detach(),
+            'importance_feasible': (importance_weights*feasible).mean().detach(),
+            'feasible': feasible.mean().detach(),
         }
 
     def dual_step(
@@ -237,15 +243,32 @@ class MultiPdAlignementTrainer(MultiDualTrainer):
             safety_loss = loss_dict['safety_loss'].mean()
 
             importance_weights = loss_dict['importance_weights'].mean()
+            costs = loss_dict['costs'].mean()
+            rewards = loss_dict['rewards'].mean()
+            importance_infeasible = loss_dict['importance_infeasible'].mean()
+            importance_feasible = loss_dict['importance_feasible'].mean()
+            feasible = loss_dict['feasible'].mean()
 
+            costs = get_all_reduce_mean(costs)
+            rewards = get_all_reduce_mean(rewards)
             loss = get_all_reduce_mean(loss)
             dkl_loss = get_all_reduce_mean(dkl_loss)
             safety_loss = get_all_reduce_mean(safety_loss)
             importance_weights = get_all_reduce_mean(importance_weights)
-
+            importance_infeasible = get_all_reduce_mean(importance_infeasible)
+            importance_feasible = get_all_reduce_mean(importance_feasible)
+            feasible = get_all_reduce_mean(feasible)
         return {
             'train/loss': loss.item(),
             'train/dkl_loss': dkl_loss.item(),
             'train/safety_loss': safety_loss.item(),
             'train/importance_weights': importance_weights.item(),
+            'train/costs': costs.item(),
+            'train/rewards': rewards.item(),
+            'train/importance_infeasible': importance_infeasible.item(),
+            'train/importance_feasible': importance_feasible.item(),
+            'multipliers/0': self.multipliers[0].item(),
+            'multipliers/1': self.multipliers[1].item(),
+            'multipliers/2': self.multipliers[2].item(),
+            'train/feasible': feasible.item(),
         }

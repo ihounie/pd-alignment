@@ -31,7 +31,7 @@ export WANDB_ENTITY="alelab"
 
 CACHE_DIR="/home/chiche/pd-alignment/cache/beavertails-12k"
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
-COST_MODEL_NAME_OR_PATH="/home/chiche/pd-alignment/output/classifier/google/shieldgemma-2b-5e-4-eos"
+COST_MODEL_NAME_OR_PATH="ihounie/gemma-beavertails-12k-cost-eos"
 REWARD_MODEL_NAME_OR_PATH="none"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment-${timestamp}"
@@ -133,9 +133,9 @@ exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log
 
 # Define arrays for thresholds and corresponding lambda initializations
 # Iterate over the pairs
-for threshold in 0.05 0.1 0.025 0.0125  0.00625
+for threshold in 0.1 # 0.1 0.025 0.0125  0.00625
 do
-	for lr in 1e-4 # 1e-6 # 1e-5 1e-4 1e-7 1e-8
+	for lr in 5e-3 # 1e-6 # 1e-5 1e-4 1e-7 1e-8
 	do
 		deepspeed "${DEEPSPEED_ARGS[@]}" \
 		--module safe_rlhf.algorithms.multi_pd_alignment \
@@ -162,7 +162,7 @@ do
 		--scale_coeff "${SCALE_COEFF}" \
 		--output_dir "${OUTPUT_DIR}" \
 		--log_type wandb \
-		--log_project Safe-RLHF-PDA \
+		--log_project Multi-Safe-RLHF-PDA \
 		--zero_stage "${ZERO_STAGE}" \
 		--offload "${OFFLOAD}" \
 		--bf16 False \
@@ -177,9 +177,10 @@ do
 		--train_batches_on_eval 10 \
 		--num_batches_dual 2 \
 		--num_responses_for_dual 10 \
-		--num_responses_eval 10 \
+		--num_responses_eval 2 \
 		--sample_responses_for_dual True \
 		--run_closed_form_dual True \
 		--eval_at_init True
+
 	done
 done

@@ -316,9 +316,16 @@ def parse_arguments() -> argparse.Namespace:
     training_parser.add_argument(
         '--safety_threshold',
         type=float,
-        default=0.82,
+        default=0.1,
         help='The safety threshold for the model.',
     )
+    training_parser.add_argument(
+        '--scale_costs',
+        type=float,
+        default=10.0,
+        help='The scale factor for the costs.',
+    )
+
 
     training_parser.add_argument(
         '--train_batches_on_eval',

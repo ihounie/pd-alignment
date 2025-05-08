@@ -62,6 +62,8 @@ class MultiDualTrainer(TrainerBase):
     def __init__(self, args: argparse.Namespace, ds_config: dict[str, Any]) -> None:
         """Initialize trainer."""
         self.args = args
+        self.args.safety_threshold = self.args.scale_costs*self.args.safety_threshold
+        self.args.scale_coeff = self.args.scale_costs*self.args.scale_coeff
         self.ds_config = ds_config
         self.global_step = 0
 
@@ -139,7 +141,7 @@ class MultiDualTrainer(TrainerBase):
 
                 if os.path.exists(dual_costs_cache_path) and not self.args.recompute_costs:
                     print(f"Loading cached dual costs from {dual_costs_cache_path}")
-                    costs = torch.load(dual_costs_cache_path, map_location=self.args.device)[
+                    costs = self.args.scale_costs*torch.load(dual_costs_cache_path, map_location=self.args.device)[
                         :, :, :-1
                     ]
                     print("Loaded cached dual costs successfully")
@@ -299,7 +301,7 @@ class MultiDualTrainer(TrainerBase):
         if os.path.exists(costs_cache_path) and not self.args.recompute_costs:
             print(f"Loading cached costs from {costs_cache_path}")
             self.costs = torch.load(costs_cache_path, map_location=self.args.device)
-            self.costs = self.costs[:, :-1]
+            self.costs = self.args.scale_costs*self.costs[:, :-1]
             print("Loaded cached costs successfully")
             return
 
@@ -656,7 +658,7 @@ class MultiDualTrainer(TrainerBase):
         all_kl_divs_mean = local_sum_kl / local_count
 
         # get slacks
-        slacks = all_costs_mean - self.args.safety_threshold
+        slacks = self.args.scale_costs*all_costs_mean - self.args.safety_threshold
         cost_dict = {
             f'{prefix}/cost[{i}]': cost.item() for i, cost in enumerate(all_costs_mean.cpu())
         }
@@ -822,7 +824,7 @@ class DualOptimizer:
         self, optimizer='GD', set_optimum=False, beta=0.1, verbose=False, max_loops=100, **kwargs
     ):
         lam_init = 1 if 'lam_init' not in kwargs.keys() else kwargs['lam_init']
-        lr = 5 if 'lr' not in kwargs.keys() else 2 * kwargs['lr']
+        lr = 0.5 if 'lr' not in kwargs.keys() else 2 * kwargs['lr']
         max_iters = 1000 if 'num_iters' not in kwargs.keys() else kwargs['num_iters']
         err = 1e-3 if 'err' not in kwargs.keys() else kwargs['err']
         if optimizer == 'scipy':
