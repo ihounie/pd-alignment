@@ -17,6 +17,8 @@
 from safe_rlhf.algorithms.ppo import PPOTrainer
 from safe_rlhf.algorithms.ppo_lag import PPOLagTrainer
 from safe_rlhf.algorithms.ppo_reward_shaping import PPORewardShapingTrainer
+from safe_rlhf.algorithms.pubmedqa import PubMedQATrainer  # type: ignore[F401]
+from safe_rlhf.algorithms.pubmedqa_constrained.trainer import PubMedQAConstrainedTrainer  # type: ignore[F401]
 
 
-__all__ = ['PPOTrainer', 'PPOLagTrainer', 'PPORewardShapingTrainer']
+__all__ = ['PPOTrainer', 'PPOLagTrainer', 'PPORewardShapingTrainer', 'PubMedQAConstrainedTrainer']

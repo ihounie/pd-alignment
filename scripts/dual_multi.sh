@@ -29,7 +29,7 @@ export LOGLEVEL="${LOGLEVEL:-WARNING}"
 
 export WANDB_ENTITY="alelab"
 
-CACHE_DIR="/home/chiche/pd-alignment/cache/beavertails-12k"
+CACHE_DIR="cache/beavertails-12k"
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
 COST_MODEL_NAME_OR_PATH="ihounie/gemma-beavertails-12k-cost-eos"
 REWARD_MODEL_NAME_OR_PATH="none"
@@ -133,9 +133,9 @@ exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log
 
 # Define arrays for thresholds and corresponding lambda initializations
 # Iterate over the pairs
-for threshold in 0.1 # 0.1 0.025 0.0125  0.00625
+for threshold in 0.25 0.2 0.15 0.1
 do
-	for lr in 5e-3 # 1e-6 # 1e-5 1e-4 1e-7 1e-8
+	for lr in 1e-4 # 1e-6 # 1e-5 1e-4 1e-7 1e-8
 	do
 		deepspeed "${DEEPSPEED_ARGS[@]}" \
 		--module safe_rlhf.algorithms.multi_pd_alignment \
@@ -145,20 +145,20 @@ do
 		--model_name_or_path "${MODEL_NAME_OR_PATH}" \
 		--max_length 512 \
 		--trust_remote_code True \
-		--epochs 3 \
-		--per_device_train_batch_size 1 \
-		--per_device_eval_batch_size 1 \
-		--eval_batch_size 16 \
-		--gradient_accumulation_steps 16 \
+		--epochs 20 \
+		--per_device_train_batch_size 16 \
+		--per_device_eval_batch_size 16 \
+		--eval_batch_size 32 \
+		--gradient_accumulation_steps 1 \
 		--gradient_checkpointing \
 		--learning_rate "${lr}" \
 		--lr_scheduler_type cosine \
 		--lr_warmup_ratio 0.1 \
-		--weight_decay 0.05 \
+		--weight_decay 0.001 \
 		--seed 42 \
 		--need_eval \
 		--eval_strategy epoch \
-		--resilient_coeff 0.0 \
+		--resilient_coeff 10.0 \
 		--scale_coeff "${SCALE_COEFF}" \
 		--output_dir "${OUTPUT_DIR}" \
 		--log_type wandb \
@@ -172,7 +172,7 @@ do
 		--eval_at_init False \
 		--compute_kl_eval True \
 		--compute_costs_eval True \
-		--dual_step_size 0.0 \
+		--dual_step_size 1.0 \
 		--safety_threshold "${threshold}" \
 		--train_batches_on_eval 10 \
 		--num_batches_dual 2 \

@@ -30,7 +30,7 @@ export LOGLEVEL="${LOGLEVEL:-WARNING}"
 export WANDB_ENTITY="alelab"
 
 MODEL_NAME_OR_PATH="PKU-Alignment/alpaca-7b-reproduced"
-COST_MODEL_NAME_OR_PATH="/home/chiche/pd-alignment/output/cm"
+COST_MODEL_NAME_OR_PATH="output/cm"
 REWARD_MODEL_NAME_OR_PATH="PKU-Alignment/beaver-7b-v1.0-reward"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_DIR="${ROOT_DIR}/output/pd_alignment-${timestamp}"

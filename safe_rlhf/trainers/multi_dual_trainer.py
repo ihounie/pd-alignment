@@ -169,7 +169,7 @@ class MultiDualTrainer(TrainerBase):
                     # Ensure every rank waits until the file is written
                     if dist.is_available() and dist.is_initialized():
                         dist.barrier()
-                    costs = costs[:, :, :-1]
+                    costs = self.args.scale_costs*costs[:, :, :-1]
             else:
                 costs = self.costs
             # ------------------------------------------------------------------
@@ -741,6 +741,9 @@ class MultiDualTrainer(TrainerBase):
                     self.logger.log(self.eval(), step=self.global_step)
 
             self.model.tput_timer.update_epoch_count()
+            if epoch >= self.args.epochs - 10:
+                # Decrease dual learning rate
+                self.args.dual_step_size = self.args.dual_step_size*0.7
 
     def set_train(self, mode: bool = True) -> None:
         """Set training mode for model."""

@@ -97,6 +97,13 @@ class SupervisedTrainer(TrainerBase):
         self.unfreeze_score_head()
         # Unfreeze the last Transformer layer
 
+        # Ensure all parameters share the same dtype to avoid runtime matmul dtype mismatches.
+        # If the backbone weights are in bfloat16, convert newly initialized heads (often float32)
+        # to bfloat16 as well.
+        param_dtypes = {p.dtype for p in self.model.parameters()}
+        if torch.bfloat16 in param_dtypes and torch.float32 in param_dtypes:
+            self.model.to(dtype=torch.bfloat16)
+
     def unfreeze_score_head(self) -> None:
         model = self.model.module if hasattr(self.model, 'module') else self.model.model
         if hasattr(model, 'score_head'):
@@ -135,6 +142,8 @@ class SupervisedTrainer(TrainerBase):
                 collate_fn=eval_dataset.get_collator(),
                 sampler=DistributedSampler(eval_dataset, shuffle=True),
                 batch_size=self.args.per_device_eval_batch_size,
+                num_workers=self.args.dataloader_workers,
+                pin_memory=True,
             )
         else:
             self.eval_dataloader = None
@@ -144,6 +153,8 @@ class SupervisedTrainer(TrainerBase):
             collate_fn=train_dataset.get_collator(),
             sampler=DistributedSampler(train_dataset, shuffle=True),
             batch_size=self.args.per_device_train_batch_size,
+            num_workers=self.args.dataloader_workers,
+            pin_memory=True,
         )
 
     def init_engines(self) -> None:
