@@ -78,6 +78,12 @@ from safe_rlhf.datasets.supervised import (
     SupervisedDataset,
     SupervisedSample,
 )
+from safe_rlhf.datasets.pubmedqa import (
+    PubMedQADataset,
+    PubMedQACollator,
+    PubMedQASample,
+    PubMedQABatch,
+)
 
 
 __all__ = [
@@ -119,6 +125,10 @@ __all__ = [
     'PreferenceCostCollator',
     'PreferenceCostSample',
     'PreferenceCostBatch',
+    'PubMedQADataset',
+    'PubMedQACollator',
+    'PubMedQASample',
+    'PubMedQABatch',
     *raw.__all__,
 ]
 
