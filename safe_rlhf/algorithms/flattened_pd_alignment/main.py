@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""The main training script to run the DPO algorithm."""
+"""The main training script to run flattened preference-based primal-dual alignment."""
 
 import argparse
 
@@ -22,9 +22,10 @@ import torch.distributed as dist
 from transformers import SchedulerType
 from transformers.utils import is_torch_bf16_gpu_available, is_torch_tf32_available
 
-from safe_rlhf.algorithms.multi_pd_alignment.trainer import MultiPdAlignementTrainer
+# Import the new trainer
+from safe_rlhf.algorithms.flattened_pd_alignment.trainer import FlattenedPdAlignmentTrainer
 from safe_rlhf.configs import get_deepspeed_eval_config, get_deepspeed_train_config
-from safe_rlhf.datasets import parse_dataset
+# Note: FlattenedPreferenceDataset will be used by the trainer, no direct import needed here
 from safe_rlhf.logger import set_logger_level
 from safe_rlhf.utils import seed_everything, str2bool
 
@@ -32,8 +33,8 @@ from safe_rlhf.utils import seed_everything, str2bool
 def parse_arguments() -> argparse.Namespace:
     """Parse the command-line arguments."""
     parser = argparse.ArgumentParser(
-        prog='deepspeed --module safe_rlhf.algorithms.multi_pd_alignment',
-        description='Train language model with the DPO algorithm.',
+        prog='deepspeed --module safe_rlhf.algorithms.flattened_pd_alignment',
+        description='Train language model with Flattened Preference Primal-Dual Alignment.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -54,49 +55,49 @@ def parse_arguments() -> argparse.Namespace:
     model_parser.add_argument(
         '--cost_model_name_or_path',
         type=str,
-        help='Path to the model checkpoint or its name.',
+        help='Path to the cost model checkpoint or its name (can be "indicator" for dataset labels).',
         required=True,
     )
     model_parser.add_argument(
         '--reward_model_name_or_path',
         type=str,
-        help='Path to the model checkpoint or its name.',
-        required=True,
+        help='Path to the reward model checkpoint or its name (can be "none" or "safety_prob").',
+        default="none", # Defaulting to none if not explicitly using rewards
     )
     model_parser.add_argument(
         '--normalize_cost',
         type=str2bool,
-        default=True,
-        help='Whether to normalize the cost.',
+        default=False, # Normalization might not be standard for indicator costs
+        help='Whether to normalize the cost (relevant if using a separate cost model).',
     )
     model_parser.add_argument(
         '--normalize_reward',
         type=str2bool,
-        default=True,
-        help='Whether to normalize the reward.',
+        default=False, # Similarly for rewards
+        help='Whether to normalize the reward (relevant if using a separate reward model).',
     )
 
     model_parser.add_argument(
         "--recompute_costs",
         action="store_true",
-        help="Force recomputation of costs even if cache exists",
+        help="Force recomputation of costs even if cache exists (for non-indicator costs).",
     )
     model_parser.add_argument(
         "--recompute_rewards",
         action="store_true",
-        help="Force recomputation of rewards even if cache exists",
+        help="Force recomputation of rewards even if cache exists.",
     )
     model_parser.add_argument(
         "--recompute_baseline",
         action="store_true",
-        help="Force recomputation of baseline even if cache exists",
+        help="Force recomputation of baseline log probabilities even if cache exists.",
     )
 
     model_parser.add_argument(
         "--cache_dir",
         type=str,
         default="cache",
-        help="Directory to store cached computations",
+        help="Directory to store cached computations (costs, rewards, baseline).",
     )
 
     model_parser.add_argument(
@@ -109,14 +110,14 @@ def parse_arguments() -> argparse.Namespace:
         '--trust_remote_code',
         type=str2bool,
         default=False,
-        help='Whether to trust the remote code.',
+        help='Whether to trust the remote code when loading models/tokenizers.',
     )
     # Lora args
     model_parser.add_argument(
         '--lora_r',
         type=int,
-        default=8,
-        help='The rank of the LoRA matrices.',
+        default=0, # Default to 0 (no LoRA) unless specified
+        help='The rank of the LoRA matrices. Set to >0 to enable LoRA.',
     )
     model_parser.add_argument(
         '--lora_alpha',
@@ -134,26 +135,28 @@ def parse_arguments() -> argparse.Namespace:
         '--lora_target_modules',
         type=str,
         default=None,
-        help='The target modules of the model.',
+        help='The target modules for LoRA (e.g., "q_proj,v_proj"). Comma-separated.',
     )
     # Dataset
     dataset_parser = parser.add_argument_group('dataset')
     dataset_parser.add_argument(
         '--train_datasets',
         type=str,
+        help='Path to the training dataset (Hugging Face dataset path or local path).',
         required=True,
     )
     dataset_parser.add_argument(
         '--eval_datasets',
         type=str,
-        required=True,
+        help='Path to the evaluation dataset (Hugging Face dataset path or local path).',
+        required=True, # Required for evaluation, even if not used extensively
     )
     dataset_parser.add_argument(
         '--num_classes',
         type=int,
-        default=4,
-        help='The number of classes in the dataset.',
-    )  # TODO: infer from dataset
+        default=4, # Example: Number of cost categories from FlattenedPreferenceDataset's labels
+        help='The number of classes/categories for costs from the dataset labels.',
+    )
 
     # Training
     training_parser = parser.add_argument_group('training')
@@ -161,64 +164,64 @@ def parse_arguments() -> argparse.Namespace:
         '--scale_coeff',
         type=float,
         default=0.02,
-        help='The coefficient for the KL divergence between the reference and actor policy.',
+        help='The coefficient for the KL divergence (DKL loss term).',
     )
     # Dual args
     training_parser.add_argument(
         '--resilient_coeff',
         type=float,
         default=1e-2,
-        help='Dual weight decay to improve stability.',
+        help='Coefficient for resilient term in dual update (prevents multipliers from growing too large).',
     )
     training_parser.add_argument(
         '--dual_init',
         type=str,
-        default='0.333,0.333,0.333',
-        help='Initial values for dual variables as comma-separated string. Default is equal weights.',
+        default='0.333,0.333,0.333', # Adjust based on num_classes if needed
+        help='Initial values for dual variables as comma-separated string.',
     )
     training_parser.add_argument(
         '--run_closed_form_dual',
         type=str2bool,
         default=False,
-        help='Whether to run the closed form dual.',
+        help='Whether to run the closed form dual solver for initialization.',
     )
     training_parser.add_argument(
         '--num_batches_dual',
         type=int,
         default=100,
-        help='The number of batches to use for the closed form dual.',
+        help='The number of batches to use for the closed form dual solver.',
     )
     training_parser.add_argument(
         '--sample_responses_for_dual',
         type=str2bool,
         default=False,
-        help='Whether to sample responses for the dual.',
+        help='Whether to sample new responses for the dual solver (uses eval logic).',
     )
     training_parser.add_argument(
         '--num_responses_for_dual',
         type=int,
         default=10,
-        help='The number of responses to use for the dual.',
+        help='The number of responses to sample per prompt for the dual solver.',
     )
     training_parser.add_argument(
         '--dual_solver_use_both_only',
         type=str2bool,
         default=False,
-        help='Whether to use only the responses that are both safe and helpful.',
+        help='For dual solver: whether to use only prompts with diverse response outcomes.',
     )
 
     training_parser.add_argument(
         '--dual_step_size',
         type=float,
         default=0.01,
-        help='The step size for the dual step.',
+        help='The step size for the dual variable updates.',
     )
 
     training_parser.add_argument(
         '--dual_weight_decay',
         type=float,
         default=0.0,
-        help='The weight decay for the dual step.',
+        help='Weight decay for dual variables (alternative to resilient_coeff).',
     )
 
     training_parser.add_argument(
@@ -243,7 +246,7 @@ def parse_arguments() -> argparse.Namespace:
         '--eval_batch_size',
         type=int,
         default=0,
-        help='Batch size to use during evaluation, overriding per_device_eval_batch_size. If 0, uses per_device_eval_batch_size.',
+        help='Specific batch size for evaluation runs, overrides per_device_eval_batch_size if > 0.',
     )
     training_parser.add_argument(
         '--gradient_accumulation_steps',
@@ -254,7 +257,7 @@ def parse_arguments() -> argparse.Namespace:
     training_parser.add_argument(
         '--gradient_checkpointing',
         action='store_true',
-        help='Enable HF gradient checkpointing for actor model.',
+        help='Enable HF gradient checkpointing for the model.',
     )
     training_parser.add_argument(
         '--lr',
@@ -287,7 +290,7 @@ def parse_arguments() -> argparse.Namespace:
         '--weight_decay',
         type=float,
         default=0.0,
-        help='Weight decay to for the model training.',
+        help='Weight decay for the model training.',
     )
     training_parser.add_argument(
         '--seed',
@@ -317,21 +320,20 @@ def parse_arguments() -> argparse.Namespace:
         '--safety_threshold',
         type=float,
         default=0.1,
-        help='The safety threshold for the model.',
+        help='The safety threshold for costs.',
     )
     training_parser.add_argument(
         '--scale_costs',
         type=float,
-        default=10.0,
-        help='The scale factor for the costs.',
+        default=1.0, # Default to 1.0 as costs come from dataset, scaling happens in trainer if needed.
+        help='The scale factor for the costs (applied in trainer if > 1).',
     )
-
 
     training_parser.add_argument(
         '--train_batches_on_eval',
         type=int,
         default=0,
-        help='The number of training batches to evaluate on.',
+        help='Number of training batches to run evaluation logic on (for metrics).',
     )
 
     # Evaluation
@@ -347,43 +349,43 @@ def parse_arguments() -> argparse.Namespace:
         '--eval_interval',
         type=int,
         default=1,
-        help='The interval to evaluate the model.',
+        help='The interval to evaluate the model (epochs or steps based on eval_strategy).',
     )
     evaluation_parser.add_argument(
         '--need_eval',
         default=False,
-        help='Whether to evaluate the model during training.',
+        help='Whether to perform evaluation during training.',
         action='store_true',
     )
     evaluation_parser.add_argument(
         '--eval_split_ratio',
         type=float,
         default=None,
-        help='The split ratio of the evaluation dataset.',
+        help='Split ratio for creating an eval set from train_datasets if eval_datasets is not given.',
     )
     evaluation_parser.add_argument(
         '--eval_at_init',
         type=str2bool,
         default=False,
-        help='Whether to evaluate the model at the initialization.',
+        help='Whether to evaluate the model at the very beginning of training.',
     )
     evaluation_parser.add_argument(
         '--num_responses_eval',
         type=int,
-        default=4,
-        help='The number of responses to use for the evaluation at the initialization.',
+        default=1, # Evaluation generates responses, usually 1 per prompt
+        help='The number of responses to generate per prompt during evaluation.',
     )
     evaluation_parser.add_argument(
         '--compute_kl_eval',
         type=str2bool,
-        default=False,
-        help='Whether to compute the KL divergence between the reference and actor policy.',
+        default=True, # KL divergence is a key metric
+        help='Whether to compute KL divergence during evaluation.',
     )
     evaluation_parser.add_argument(
         '--compute_costs_eval',
         type=str2bool,
-        default=False,
-        help='Whether to compute the costs of the model.',
+        default=True, # Costs are key for safety evaluation
+        help='Whether to compute costs during evaluation using the cost model.',
     )
 
     # Logging
@@ -392,43 +394,43 @@ def parse_arguments() -> argparse.Namespace:
         '--output_dir',
         type=str,
         default=None,
-        help='Where to store the model.',
+        help='Directory to store the final model and training logs/checkpoints.',
     )
     logging_parser.add_argument(
         '--log_type',
         type=str,
-        help='The type of logging.',
+        help='The type of logging provider.',
         default='wandb',
         choices=['wandb', 'tensorboard'],
     )
     logging_parser.add_argument(
         '--log_dir',
         type=str,
-        help='The directory to store the logs.',
+        help='The specific directory to store logs (e.g., for tensorboard).',
         default=None,
     )
     logging_parser.add_argument(
         '--log_project',
         type=str,
-        help='The project name for logging.',
+        help='The project name for logging (e.g., for wandb).',
         default=None,
     )
     logging_parser.add_argument(
         '--log_run_name',
         type=str,
-        help='The run name for logging.',
+        help='The unique run name for logging.',
         default=None,
     )
     logging_parser.add_argument(
         '--save_16bit',
         action='store_true',
-        help='Whether to save the model in 16-bit precision.',
+        help='Whether to save the model in 16-bit precision (e.g., for LoRA).',
     )
     logging_parser.add_argument(
         '--save_interval',
         type=int,
-        default=1000000,
-        help='The interval to save the model.',
+        default=1000000, # Default to a large number (effectively end of training)
+        help='The interval (in global steps) to save model checkpoints.',
     )
 
     # DeepSpeed
@@ -437,21 +439,21 @@ def parse_arguments() -> argparse.Namespace:
         '--local_rank',
         type=int,
         default=-1,
-        help='Local rank for distributed training on GPUs',
+        help='Local rank for distributed training on GPUs (set by DeepSpeed).',
     )
     deepspeed_parser.add_argument(
         '--zero_stage',
         type=int,
         default=0,
         choices=[0, 1, 2, 3],
-        help='ZeRO optimization stage for models.',
+        help='ZeRO optimization stage for DeepSpeed.',
     )
     deepspeed_parser.add_argument(
         '--offload',
         type=str,
         default='none',
         choices=['none', 'parameter', 'optimizer', 'all'],
-        help='Offload parameters and/or optimizer states to CPU.',
+        help='Parameter and/or optimizer offload to CPU for DeepSpeed ZeRO.',
     )
     parser = deepspeed.add_config_arguments(parser)
 
@@ -467,6 +469,10 @@ def parse_arguments() -> argparse.Namespace:
         )
     if args.tf32 is not None and is_torch_tf32_available():
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
+
+    # Process lora_target_modules if provided
+    if args.lora_target_modules:
+        args.lora_target_modules = [module.strip() for module in args.lora_target_modules.split(',')]
 
     return args
 
@@ -502,10 +508,11 @@ def main() -> None:
         bf16=args.bf16,
     )
 
-    trainer = MultiPdAlignementTrainer(args, ds_train_config, ds_eval_config)
+    # Instantiate the new trainer
+    trainer = FlattenedPdAlignmentTrainer(args, ds_train_config, ds_eval_config)
     trainer.train()
-    trainer.save()
+    trainer.save() # Ensure save method is implemented or inherited correctly
 
 
 if __name__ == '__main__':
-    main()
+    main() 

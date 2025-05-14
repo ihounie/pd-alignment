@@ -163,7 +163,7 @@ class PrefMultiDualTrainer(TrainerBase):
 
         # If we need to compute baseline logprobs
         print("Computing baseline logprobs...")
-        if self.train_dataloader.dataset.num_respones != 1:
+        if self.train_dataloader.dataset.num_responses != 1:
             raise NotImplementedError(
                 "Baseline logprob computation is not implemented for multi-response datasets"
             )

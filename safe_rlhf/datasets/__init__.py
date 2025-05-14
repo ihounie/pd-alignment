@@ -23,11 +23,7 @@ from torch.utils.data import Dataset
 
 from safe_rlhf.datasets import raw
 from safe_rlhf.datasets.base import (
-    CollatorBase,
-    RawDataset,
-    RawSample,
-    TokenizedDataset,
-    parse_dataset,
+    Dataset, RawDataset, RawSample, TokenizedDataset, CollatorBase, parse_dataset
 )
 from safe_rlhf.datasets.multiclass_safety import (
     MultiClassSafetyBatch,
@@ -84,6 +80,12 @@ from safe_rlhf.datasets.pubmedqa import (
     PubMedQASample,
     PubMedQABatch,
 )
+from safe_rlhf.datasets.flattened_preference import (
+    FlattenedPreferenceDataset,
+    FlattenedPreferenceCollator,
+    FlattenedPreferenceSample,
+    FlattenedPreferenceBatch,
+)
 
 
 __all__ = [
@@ -129,6 +131,10 @@ __all__ = [
     'PubMedQACollator',
     'PubMedQASample',
     'PubMedQABatch',
+    'FlattenedPreferenceDataset',
+    'FlattenedPreferenceCollator',
+    'FlattenedPreferenceSample',
+    'FlattenedPreferenceBatch',
     *raw.__all__,
 ]
 

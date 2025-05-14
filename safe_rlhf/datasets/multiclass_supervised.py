@@ -85,7 +85,7 @@ class MultiClassSupervisedDataset(TokenizedDataset):
             lazy_tokenization=lazy_tokenization,
             seed=seed,
         )
-        self.num_respones = 1
+        self.num_responses = 1
 
     def preprocess(self, raw_sample: RawSample) -> MultiClassSupervisedSample:
         # Combine prompt and response

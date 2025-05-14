@@ -150,7 +150,7 @@ class DualTrainer(TrainerBase):
 
         # Initialize baseline tensor
         self.baseline_logprobs = 10 * torch.ones(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones),
+            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_responses),
             dtype=self.model.dtype,
         )
         self.baseline_logprobs = to_device(self.baseline_logprobs, self.args.device)
@@ -221,7 +221,7 @@ class DualTrainer(TrainerBase):
         # If we need to compute costs
         # Initialize costs tensor
         self.costs = torch.zeros(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones)
+            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_responses)
         )
         self.costs = to_device(self.costs, self.args.device)
         print("Computing costs...")
@@ -306,7 +306,7 @@ class DualTrainer(TrainerBase):
 
         # Initialize rewards tensor
         self.rewards = torch.zeros(
-            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_respones)
+            (len(self.train_dataloader.dataset), self.train_dataloader.dataset.num_responses)
         )
         self.rewards = to_device(self.rewards, self.args.device)
 

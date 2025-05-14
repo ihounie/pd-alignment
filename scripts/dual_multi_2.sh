@@ -133,11 +133,11 @@ exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log
 
 # Define arrays for thresholds and corresponding lambda initializations
 # Iterate over the pairs
-for threshold in  -0.04 -0.06 -0.02 -0.01
+for threshold in -0.02 -0.04 -0.06 -0.08
 do
-	for lr in 1e-3 # 1e-6 1e-5 1e-4 1e-7 1e-8
+	for lr in 5e-4 # 1e-6 1e-5 1e-4 1e-7 1e-8
 	do
-		CUDA_VISIBLE_DEVICES=1 deepspeed "${DEEPSPEED_ARGS[@]}" \
+		CUDA_VISIBLE_DEVICES=0 deepspeed "${DEEPSPEED_ARGS[@]}" \
 		--module safe_rlhf.algorithms.multi_pd_alignment \
 		--cache_dir "${CACHE_DIR}" \
 		--train_datasets ihounie/beavertails-12k-bal:train \
@@ -158,7 +158,7 @@ do
 		--seed 42 \
 		--need_eval \
 		--eval_strategy epoch \
-		--resilient_coeff 10.0 \
+		--resilient_coeff 100.0 \
 		--scale_coeff "${SCALE_COEFF}" \
 		--output_dir "${OUTPUT_DIR}" \
 		--log_type wandb \
@@ -172,13 +172,15 @@ do
 		--eval_at_init False \
 		--compute_kl_eval True \
 		--compute_costs_eval True \
-		--dual_step_size 2.0 \
+		--dual_step_size 1.0 \
 		--safety_threshold "${threshold}" \
 		--train_batches_on_eval 64 \
 		--num_batches_dual 64 \
 		--num_responses_for_dual 2 \
 		--num_responses_eval 2 \
 		--sample_responses_for_dual True \
-		--run_closed_form_dual True 
+		--run_closed_form_dual True \
+		--eval_at_init True
+
 	done
 done

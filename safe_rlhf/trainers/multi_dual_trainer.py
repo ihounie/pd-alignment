@@ -177,6 +177,7 @@ class MultiDualTrainer(TrainerBase):
             # the resulting multipliers to all other ranks so that every worker
             # has a consistent view while avoiding redundant computation.
             # ------------------------------------------------------------------
+            self.args.safety_threshold = costs.mean(axis=(0,1)) + self.args.safety_threshold 
             if is_main_process():
                 print("Solving closed form dual...")
                 print("Mean costs: ", costs.mean(dim=(0, 1)))
@@ -229,7 +230,7 @@ class MultiDualTrainer(TrainerBase):
 
         # If we need to compute baseline logprobs
         print("Computing baseline logprobs...")
-        if self.train_dataloader.dataset.num_respones != 1:
+        if self.train_dataloader.dataset.num_responses != 1:
             raise NotImplementedError(
                 "Baseline logprob computation is not implemented for multi-response datasets"
             )
@@ -310,7 +311,14 @@ class MultiDualTrainer(TrainerBase):
         self.costs = torch.zeros(len(self.train_dataloader.dataset), self.args.num_classes)
         self.costs = to_device(self.costs, self.args.device)
         print("Computing costs...")
-        if self.args.cost_model_name_or_path == "indicator":
+        # Robust check for "indicator"
+        is_indicator_mode = False
+        if isinstance(self.args.cost_model_name_or_path, str):
+            is_indicator_mode = self.args.cost_model_name_or_path.strip() == "indicator"
+        
+        print(f"[DEBUG init_costs] self.args.cost_model_name_or_path: '{self.args.cost_model_name_or_path}', stripped check result: {is_indicator_mode}")
+
+        if is_indicator_mode:
             for batch in tqdm(self.train_dataloader, desc='Computing indicator costs'):
                 self.costs[batch['index'], :] = batch['labels']
         else:
@@ -344,6 +352,14 @@ class MultiDualTrainer(TrainerBase):
         # Free up memory
         del cost_model
         torch.cuda.empty_cache()
+        
+        # Check for all-zero cost rows before final modification
+        if self.costs is not None and torch.any((self.costs == 0).all(dim=1)):
+             zero_rows_indices = torch.where((self.costs == 0).all(dim=1))[0]
+             print(f"WARNING: Found rows in the cost tensor that are all zeros at indices: {zero_rows_indices.tolist()}")
+             # Decide on action: raise error or just warn
+             # raise ValueError(f"Cost tensor contains rows with all zeros at indices: {zero_rows_indices.tolist()}")
+
         self.costs = self.costs[:, :-1]
         # self.costs = 1 - self.costs
         # reinitialize datasets
@@ -484,9 +500,9 @@ class MultiDualTrainer(TrainerBase):
                 sampler=DistributedSampler(self.eval_dataloader.dataset, shuffle=True),
                 batch_size=self.args.eval_batch_size,
             )
-            eval_dict = self.run_eval(temp_eval_dataloader, prefix="eval/test")
+            eval_dict = self.run_eval(temp_eval_dataloader, prefix="eval/test", num_batches=self.args.train_batches_on_eval, num_responses=self.args.num_responses_eval)
         else:
-            eval_dict = self.run_eval(self.eval_dataloader, prefix="eval/test")
+            eval_dict = self.run_eval(self.eval_dataloader, prefix="eval/test", num_batches=self.args.train_batches_on_eval, num_responses=self.args.num_responses_eval)
 
         if self.args.train_batches_on_eval > 0:
             # Create temporary train dataloader with the eval_batch_size if specified
@@ -626,8 +642,8 @@ class MultiDualTrainer(TrainerBase):
         # Concatenate collected tensors along the batch dimension
         #   Costs: list[(B, R, C)] -> (N_prompt, R, C)
         #   KL   : list[(B, R)]    -> (N_prompt, R)
-        all_costs = torch.cat(all_costs, dim=0)  # (N, R, C)
-        all_kl_divs = torch.cat(all_kl_divs, dim=0)  # (N, R)
+        all_costs = torch.cat(all_costs, dim=0).float()  # (N, R, C)
+        all_kl_divs = torch.cat(all_kl_divs, dim=0).float() # (N, R)
 
         # Treat each response as an independent sample when averaging -> collapse first two dims
         all_costs_flat = all_costs.view(-1, all_costs.size(-1))  # (N*R, C)
@@ -657,13 +673,35 @@ class MultiDualTrainer(TrainerBase):
         all_costs_mean = local_sum_costs / local_count  # (C,)
         all_kl_divs_mean = local_sum_kl / local_count
 
+        all_costs_mean = all_costs_mean[:-1]
+
+        safety_mean = all_costs_mean[-1]
+
         # get slacks
         slacks = self.args.scale_costs*all_costs_mean - self.args.safety_threshold
         cost_dict = {
             f'{prefix}/cost[{i}]': cost.item() for i, cost in enumerate(all_costs_mean.cpu())
         }
-        slack_dict = {f'{prefix}/slack[{i}]': slack.item() for i, slack in enumerate(slacks)}
+        cost_dict[f'{prefix}/safety'] = safety_mean.cpu().item()
+        # Ensure slacks are on CPU for logging if not already, before calling .item()
+        slack_dict = {f'{prefix}/slack[{i}]': slack_item.item() for i, slack_item in enumerate(slacks.cpu())}
         kl_dict = {f'{prefix}/kl_div': all_kl_divs_mean.item()}
+
+
+
+        # Base output dictionary for logging
+        output_dict_logging = {
+            **cost_dict,
+            **slack_dict,
+            **kl_dict,
+        }
+        
+        # Full output dictionary including the slacks tensor for dual step
+        output_dict_full = {
+            **output_dict_logging,
+            f'{prefix}/slacks_tensor': slacks.detach().clone(), # Keep on self.args.device
+        }
+
         if return_costs:
             # Optionally gather the per-sample costs across all GPUs so that the
             # caller can access the complete tensor on the main process. We use
@@ -677,10 +715,12 @@ class MultiDualTrainer(TrainerBase):
                     all_costs_full = torch.empty(0, dtype=all_costs.dtype)
             else:
                 all_costs_full = all_costs
-
-            return {**cost_dict, **slack_dict, **kl_dict, "costs": all_costs_full}
+            
+            output_dict_full["costs_all_samples"] = all_costs_full # Use a distinct key
+            return output_dict_full
         else:
-            return {**slack_dict, **kl_dict}
+            # If not returning all costs, just return the logging dict + slacks tensor
+            return output_dict_full #This now includes slacks_tensor for the dual step
 
     def train(self) -> None:
         """Train the model."""
@@ -696,9 +736,33 @@ class MultiDualTrainer(TrainerBase):
 
         if self.args.need_eval and self.args.eval_at_init:
             self.logger.print('\n***** Evaluating at the beginning *****')
-            # only eval on the main process
+            eval_output_at_init = self.eval() # Ensure all processes participate in eval if it has collectives
             if is_main_process():
-                self.logger.log(self.eval(), step=0)
+                self.logger.log(eval_output_at_init, step=0)
+                # Perform dual step update on main process using train slacks if available
+                if self.args.train_batches_on_eval > 0:
+                    train_slacks_key = 'eval/train/slacks_tensor'
+                    if train_slacks_key in eval_output_at_init:
+                        current_train_slacks = eval_output_at_init[train_slacks_key]
+                        current_train_slacks = to_device(current_train_slacks, self.args.device)
+                        # Slacks from run_eval are (num_classes), multipliers are (num_classes - 1)
+                        slacks_for_dual = current_train_slacks.clone() if len(current_train_slacks) > 1 else current_train_slacks.clone()
+                        if len(slacks_for_dual) > len(self.multipliers):
+                            slacks_for_dual = slacks_for_dual[:-1]
+
+                        self.logger.print(f'***** Performing dual step at initialization (main process, using train slacks) *****')
+                        self.logger.print(f'Old multipliers: {self.multipliers.tolist()}')
+                        updated_multipliers = self.dual_step(slacks=slacks_for_dual, multipliers = self.multipliers)
+                        self.multipliers.copy_(to_device(updated_multipliers, self.args.device))
+                        self.logger.print(f'New multipliers (main process): {self.multipliers.tolist()}')
+                        for i, mult_val in enumerate(self.multipliers):
+                            self.logger.log({f'multipliers_updated_init_train_slacks/{i}': mult_val.item()}, step=0)
+                    else:
+                        self.logger.print(f"INFO (main process): Train slacks ({train_slacks_key}) not found for dual step at init.")
+            
+            if dist.is_available() and dist.is_initialized(): # Broadcast updated multipliers
+                dist.broadcast(self.multipliers, src=0)
+
         for epoch in range(self.args.epochs):
             self.model.train()
 
@@ -730,20 +794,94 @@ class MultiDualTrainer(TrainerBase):
                     and self.global_step % self.args.eval_interval == 0
                 ):
                     self.logger.print(f'\n***** Evaluating at step {self.global_step} *****')
-                    self.logger.log(self.eval(), step=self.global_step)
+                    eval_output_step = self.eval() # Ensure all processes participate
+                    self.logger.log(eval_output_step, step=self.global_step) # Log for all processes or let logger handle it
 
-            if self.args.need_eval and self.args.eval_strategy == 'epoch':
+                    if is_main_process():
+                        if self.args.train_batches_on_eval > 0:
+                            train_slacks_key = 'eval/train/slacks_tensor'
+                            if train_slacks_key in eval_output_step:
+                                current_train_slacks = eval_output_step[train_slacks_key]
+                                current_train_slacks = to_device(current_train_slacks, self.args.device)
+                                slacks_for_dual = current_train_slacks.clone() if len(current_train_slacks) > 1 else current_train_slacks.clone()
+                                if len(slacks_for_dual) > len(self.multipliers):
+                                    slacks_for_dual = slacks_for_dual[:-1]
+
+                                self.logger.print(f'***** Performing dual step at step {self.global_step} (main process, using train slacks) *****')
+                                self.logger.print(f'Old multipliers: {self.multipliers.tolist()}')
+                                updated_multipliers = self.dual_step(slacks=slacks_for_dual, multipliers = self.multipliers)
+                                self.multipliers.copy_(to_device(updated_multipliers, self.args.device))
+                                self.logger.print(f'New multipliers (main process): {self.multipliers.tolist()}')
+                                for i, mult_val in enumerate(self.multipliers):
+                                    self.logger.log({f'multipliers_updated_step_train_slacks/{i}': mult_val.item()}, step=self.global_step)
+                            else:
+                                self.logger.print(f"INFO (main process): Train slacks ({train_slacks_key}) not found for dual step at step {self.global_step}.")
+
+                    if dist.is_available() and dist.is_initialized(): # Broadcast updated multipliers
+                        dist.broadcast(self.multipliers, src=0)
+
+            if self.args.need_eval and self.args.eval_strategy == 'epoch' and epoch % 2 == 0:
                 self.logger.print(
                     f'\n***** Evaluating at epoch {epoch + 1}/{self.args.epochs} *****',
                 )
-                # only eval on the main process
+                eval_output_epoch = self.eval() # Ensure all processes participate
                 if is_main_process():
-                    self.logger.log(self.eval(), step=self.global_step)
+                    self.logger.log(eval_output_epoch, step=self.global_step)
+                    if self.args.train_batches_on_eval > 0:
+                        train_slacks_key = 'eval/train/slacks_tensor'
+                        if train_slacks_key in eval_output_epoch:
+                            current_train_slacks = eval_output_epoch[train_slacks_key]
+                            current_train_slacks = to_device(current_train_slacks, self.args.device)
+                            slacks_for_dual = current_train_slacks.clone() if len(current_train_slacks) > 1 else current_train_slacks.clone()
+                            if len(slacks_for_dual) > len(self.multipliers):
+                                slacks_for_dual = slacks_for_dual[:-1]
+
+                            self.logger.print(f'***** Performing dual step at epoch {epoch + 1} (main process, using train slacks) *****')
+                            self.logger.print(f'Old multipliers: {self.multipliers.tolist()}')
+                            updated_multipliers = self.dual_step(slacks=slacks_for_dual, multipliers = self.multipliers)
+                            self.multipliers.copy_(to_device(updated_multipliers, self.args.device))
+                            self.logger.print(f'New multipliers (main process): {self.multipliers.tolist()}')
+                            for i, mult_val in enumerate(self.multipliers):
+                                self.logger.log({f'multipliers_updated_epoch_train_slacks/{i}': mult_val.item()}, step=self.global_step)
+                        else:
+                            self.logger.print(f"INFO (main process): Train slacks ({train_slacks_key}) not found for dual step at epoch {epoch + 1}.")
+                
+                    if dist.is_available() and dist.is_initialized(): # Broadcast updated multipliers
+                        dist.broadcast(self.multipliers, src=0)
 
             self.model.tput_timer.update_epoch_count()
             if epoch >= self.args.epochs - 10:
                 # Decrease dual learning rate
                 self.args.dual_step_size = self.args.dual_step_size*0.7
+
+        # Final evaluation after all epochs
+        if self.args.need_eval:
+            self.logger.print(f'\n***** Performing final evaluation after all {self.args.epochs} epochs *****')
+            final_eval_output = self.eval()
+            if is_main_process():
+                self.logger.log(final_eval_output, step=self.global_step)
+                # Optionally, perform a final dual step based on these final evaluation slacks
+                if self.args.train_batches_on_eval > 0: # Re-use this condition or add a new one for final dual update
+                    train_slacks_key = 'eval/train/slacks_tensor'
+                    if train_slacks_key in final_eval_output:
+                        current_train_slacks = final_eval_output[train_slacks_key]
+                        current_train_slacks = to_device(current_train_slacks, self.args.device)
+                        slacks_for_dual = current_train_slacks.clone() if len(current_train_slacks) > 1 else current_train_slacks.clone()
+                        if len(slacks_for_dual) > len(self.multipliers):
+                            slacks_for_dual = slacks_for_dual[:-1]
+
+                        self.logger.print(f'***** Performing final dual step (main process, using train slacks from final eval) *****')
+                        self.logger.print(f'Old multipliers: {self.multipliers.tolist()}')
+                        updated_multipliers = self.dual_step(slacks=slacks_for_dual, multipliers=self.multipliers)
+                        self.multipliers.copy_(to_device(updated_multipliers, self.args.device))
+                        self.logger.print(f'New multipliers (main process): {self.multipliers.tolist()}')
+                        for i, mult_val in enumerate(self.multipliers):
+                            self.logger.log({f'multipliers_updated_final_train_slacks/{i}': mult_val.item()}, step=self.global_step)
+                    else:
+                        self.logger.print(f"INFO (main process): Train slacks ({train_slacks_key}) not found for final dual step.")
+            
+            if dist.is_available() and dist.is_initialized(): # Broadcast updated multipliers
+                dist.broadcast(self.multipliers, src=0)
 
     def set_train(self, mode: bool = True) -> None:
         """Set training mode for model."""
@@ -781,14 +919,24 @@ class DualOptimizer:
         reward,
         thresholds,  # E_{pi}[safety] >= thresholds
         kl_coeff,
-        weight_decay=0.0,
+        weight_decay=0.01,# to prevent exploding multipliers
         use_both_only=False,
         **kwargs,
     ):
         if reward is None:
             self.helpfulness_scores = np.zeros((safety_scores.shape[0], 1))
         else:
-            self.helpfulness_scores = reward
+            # cast it to np if tensor
+            if isinstance(reward, torch.Tensor):
+                self.helpfulness_scores = reward.cpu().numpy()
+            else:
+                self.helpfulness_scores = reward
+                # cast it to np if tensor
+        if isinstance(safety_scores, torch.Tensor):
+            safety_scores = safety_scores.cpu().numpy()
+        else:
+            safety_scores = safety_scores
+
         if use_both_only:
             worst_score_per_prompt = safety_scores.max(axis=(2))
             both = (worst_score_per_prompt.max(axis=1) > thresholds) * (
@@ -798,10 +946,15 @@ class DualOptimizer:
             self.helpfulness_scores = self.helpfulness_scores[both]
         else:
             self.safety_scores = safety_scores
-        self.thresholds = thresholds
+        # cast it to np if tensor
+        if isinstance(thresholds, torch.Tensor):
+            self.thresholds = thresholds.cpu().numpy()
+        else:
+            self.thresholds = thresholds
         self.kl_coeff = kl_coeff
         self.kwargs = kwargs
         self.weight_decay = weight_decay
+
         print(
             f"Dual solver initialized with {self.safety_scores.shape[0]} samples and {self.safety_scores.shape[1]} responses"
         )
@@ -824,11 +977,11 @@ class DualOptimizer:
         return np.log(mean_exp) + max_logits.squeeze(-1)  # Shape: (2000)
 
     def solve(
-        self, optimizer='GD', set_optimum=False, beta=0.1, verbose=False, max_loops=100, **kwargs
+        self, optimizer='GD', set_optimum=False, beta=0.01, verbose=False, max_loops=50, **kwargs
     ):
         lam_init = 1 if 'lam_init' not in kwargs.keys() else kwargs['lam_init']
-        lr = 0.5 if 'lr' not in kwargs.keys() else 2 * kwargs['lr']
-        max_iters = 1000 if 'num_iters' not in kwargs.keys() else kwargs['num_iters']
+        lr = 1 if 'lr' not in kwargs.keys() else 2 * kwargs['lr']
+        max_iters = 500 if 'num_iters' not in kwargs.keys() else kwargs['num_iters']
         err = 1e-3 if 'err' not in kwargs.keys() else kwargs['err']
         if optimizer == 'scipy':
             raise NotImplementedError
@@ -848,14 +1001,14 @@ class DualOptimizer:
                 for idx_iter in range(max_iters):
                     logits = (
                         self.helpfulness_scores
-                        - ((self.safety_scores - self.thresholds) * lam[None, None, :]).sum(axis=-1)
+                         - ((self.safety_scores - self.thresholds) * lam[None, None, :]).sum(axis=-1)
                     ) / self.kl_coeff
                     sm_probs = softmax(logits, axis=-1)
                     gradient = (
                         np.sum(
                             (sm_probs)[:, :, None] * (self.safety_scores - self.thresholds), axis=1
                         ).mean(axis=0)
-                        + self.weight_decay * lam
+                        - self.weight_decay * lam
                     )
                     # Nesterov momentum update
                     momentum = beta * momentum + lr * gradient

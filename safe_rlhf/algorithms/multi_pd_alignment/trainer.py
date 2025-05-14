@@ -170,15 +170,15 @@ class MultiPdAlignementTrainer(MultiDualTrainer):
     def dual_step(
         self,
         slacks: torch.Tensor,
-        multipliers: torch.Tensor,
-        costs: torch.Tensor,
+        multipliers: torch.Tensor
     ):
         # #breakpoint()
+        #print("slacks", slacks)
+        #print("multipliers", multipliers)
+        #print("dual_step_size", self.args.dual_step_size)
         multipliers = multipliers + self.args.dual_step_size * (
             slacks - 1 / (2 * self.args.resilient_coeff) * multipliers
         )
-        # multiply by mask where costs are positive
-        multipliers = multipliers * (costs > 0).float()
         multipliers = torch.clamp(multipliers, min=0)
         return multipliers
 
