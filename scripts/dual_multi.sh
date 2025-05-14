@@ -133,7 +133,7 @@ exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log
 
 # Define arrays for thresholds and corresponding lambda initializations
 # Iterate over the pairs
-for threshold in  -0.04 -0.06 -0.02 -0.01
+for threshold in  -0.06 -0.04 -0.02 -0.08
 do
 	for lr in 1e-3 # 1e-6 1e-5 1e-4 1e-7 1e-8
 	do
@@ -154,7 +154,7 @@ do
 		--lr_scheduler_type cosine \
 		--lr_warmup_ratio 0.1 \
 		--weight_decay 0.001 \
-		--dual_weight_decay 0.0 \
+		--dual_weight_decay 0.1 \
 		--seed 42 \
 		--need_eval \
 		--eval_strategy epoch \

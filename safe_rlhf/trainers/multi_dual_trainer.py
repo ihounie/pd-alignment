@@ -919,7 +919,7 @@ class DualOptimizer:
         reward,
         thresholds,  # E_{pi}[safety] >= thresholds
         kl_coeff,
-        weight_decay=0.01,# to prevent exploding multipliers
+        weight_decay=0.1,# to prevent exploding multipliers
         use_both_only=False,
         **kwargs,
     ):
@@ -931,11 +931,16 @@ class DualOptimizer:
                 self.helpfulness_scores = reward.cpu().numpy()
             else:
                 self.helpfulness_scores = reward
-                # cast it to np if tensor
+        # cast it to np if tensor
         if isinstance(safety_scores, torch.Tensor):
             safety_scores = safety_scores.cpu().numpy()
         else:
             safety_scores = safety_scores
+        # cast it to np if tensor
+        if isinstance(thresholds, torch.Tensor):
+            self.thresholds = thresholds.cpu().numpy()
+        else:
+            self.thresholds = thresholds
 
         if use_both_only:
             worst_score_per_prompt = safety_scores.max(axis=(2))
@@ -946,11 +951,6 @@ class DualOptimizer:
             self.helpfulness_scores = self.helpfulness_scores[both]
         else:
             self.safety_scores = safety_scores
-        # cast it to np if tensor
-        if isinstance(thresholds, torch.Tensor):
-            self.thresholds = thresholds.cpu().numpy()
-        else:
-            self.thresholds = thresholds
         self.kl_coeff = kl_coeff
         self.kwargs = kwargs
         self.weight_decay = weight_decay

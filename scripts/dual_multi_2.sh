@@ -133,7 +133,7 @@ exec 1> >(tee "${OUTPUT_DIR}/stdout.log" >&1) 2> >(tee "${OUTPUT_DIR}/stderr.log
 
 # Define arrays for thresholds and corresponding lambda initializations
 # Iterate over the pairs
-for threshold in -0.02 -0.04 -0.06 -0.08
+for threshold in -0.02 -0.06 -0.04 -0.08
 do
 	for lr in 5e-4 # 1e-6 1e-5 1e-4 1e-7 1e-8
 	do
@@ -179,8 +179,7 @@ do
 		--num_responses_for_dual 2 \
 		--num_responses_eval 2 \
 		--sample_responses_for_dual True \
-		--run_closed_form_dual True \
-		--eval_at_init True
+		--run_closed_form_dual True 
 
 	done
 done
